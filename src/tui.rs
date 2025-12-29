@@ -37,6 +37,7 @@ pub struct AppState {
     command_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: Option<String>,
+    completion: Option<CompletionState>,
 }
 
 struct Notice {
@@ -44,6 +45,12 @@ struct Notice {
     rows: Vec<Vec<String>>,
     selected: usize,
     is_error: bool,
+}
+
+struct CompletionState {
+    base: String,
+    candidates: Vec<String>,
+    index: usize,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -68,6 +75,7 @@ impl AppState {
             command_history: Vec::new(),
             history_index: None,
             history_draft: None,
+            completion: None,
         }
     }
 
@@ -170,6 +178,7 @@ impl AppState {
         self.command_buffer.clear();
         self.history_index = None;
         self.history_draft = None;
+        self.completion = None;
     }
 
     pub fn exit_command_mode(&mut self) {
@@ -177,15 +186,18 @@ impl AppState {
         self.command_buffer.clear();
         self.history_index = None;
         self.history_draft = None;
+        self.completion = None;
     }
 
     pub fn push_command_char(&mut self, ch: char) {
         self.clear_history_navigation();
+        self.clear_completion();
         self.command_buffer.push(ch);
     }
 
     pub fn pop_command_char(&mut self) {
         self.clear_history_navigation();
+        self.clear_completion();
         self.command_buffer.pop();
     }
 
@@ -194,6 +206,7 @@ impl AppState {
         self.command_buffer.clear();
         self.history_index = None;
         self.history_draft = None;
+        self.completion = None;
         command
     }
 
@@ -202,6 +215,11 @@ impl AppState {
     }
 
     pub fn set_command_buffer(&mut self, value: String) {
+        self.clear_completion();
+        self.command_buffer = value;
+    }
+
+    pub fn set_command_buffer_from_completion(&mut self, value: String) {
         self.command_buffer = value;
     }
 
@@ -218,6 +236,7 @@ impl AppState {
             return;
         }
 
+        self.clear_completion();
         let next_index = match self.history_index {
             Some(index) => index.saturating_sub(1),
             None => {
@@ -237,6 +256,7 @@ impl AppState {
             return;
         };
 
+        self.clear_completion();
         if index + 1 < self.command_history.len() {
             let next_index = index + 1;
             self.history_index = Some(next_index);
@@ -391,6 +411,57 @@ impl AppState {
 
     pub fn clear_notice(&mut self) {
         self.notice = None;
+    }
+
+    pub fn set_completion(&mut self, base: String, candidates: Vec<String>) {
+        self.completion = Some(CompletionState {
+            base,
+            candidates,
+            index: 0,
+        });
+    }
+
+    pub fn clear_completion(&mut self) {
+        self.completion = None;
+    }
+
+    pub fn has_completion(&self) -> bool {
+        self.completion.is_some()
+    }
+
+    pub fn cycle_completion(&mut self) -> Option<String> {
+        let completion = self.completion.as_mut()?;
+        if completion.candidates.is_empty() {
+            return None;
+        }
+        completion.index = (completion.index + 1) % completion.candidates.len();
+        Some(format!(
+            "{}{}",
+            completion.base,
+            completion.candidates[completion.index]
+        ))
+    }
+
+    pub fn cycle_completion_prev(&mut self) -> Option<String> {
+        let completion = self.completion.as_mut()?;
+        if completion.candidates.is_empty() {
+            return None;
+        }
+        if completion.index == 0 {
+            completion.index = completion.candidates.len().saturating_sub(1);
+        } else {
+            completion.index -= 1;
+        }
+        Some(format!(
+            "{}{}",
+            completion.base,
+            completion.candidates[completion.index]
+        ))
+    }
+
+    pub fn completion_items(&self) -> Option<(&[String], usize)> {
+        let completion = self.completion.as_ref()?;
+        Some((&completion.candidates, completion.index))
     }
 
     fn clear_history_navigation(&mut self) {
@@ -957,12 +1028,30 @@ fn draw_tui_table(frame: &mut Frame, table: &TuiTable, area: Rect) {
 }
 
 fn draw_command_bar(frame: &mut Frame, app: &AppState, area: Rect) {
-    let content = if app.is_command_mode() {
-        format!(":{}", app.command_buffer())
+    let command = if app.is_command_mode() {
+        let mut spans = Vec::new();
+        spans.push(Span::raw(format!(":{}", app.command_buffer())));
+        if let Some((items, index)) = app.completion_items() {
+            spans.push(Span::raw("  "));
+            for (item_index, item) in items.iter().enumerate() {
+                let style = if item_index == index {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                spans.push(Span::styled(item.clone(), style));
+                if item_index + 1 < items.len() {
+                    spans.push(Span::raw(" "));
+                }
+            }
+        }
+        Paragraph::new(Line::from(spans))
     } else {
-        String::new()
+        Paragraph::new(Line::from(String::new()))
     };
-    let command = Paragraph::new(Line::from(content));
     frame.render_widget(command, area);
 }
 

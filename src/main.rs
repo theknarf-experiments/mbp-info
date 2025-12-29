@@ -367,6 +367,16 @@ fn handle_command_input(
             let collector_ids = manager.collector_ids();
             complete_command_buffer(app, &collector_ids);
         }
+        KeyCode::BackTab => {
+            if app.has_completion() {
+                if let Some(buffer) = app.cycle_completion_prev() {
+                    app.set_command_buffer_from_completion(buffer);
+                }
+            } else {
+                let collector_ids = manager.collector_ids();
+                complete_command_buffer(app, &collector_ids);
+            }
+        }
         KeyCode::Backspace => {
             app.pop_command_char();
         }
@@ -777,6 +787,13 @@ fn panel_navigate(
 }
 
 fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
+    if app.has_completion() {
+        if let Some(buffer) = app.cycle_completion() {
+            app.set_command_buffer_from_completion(buffer);
+        }
+        return;
+    }
+
     let buffer = app.command_buffer().to_string();
     let trimmed = buffer.trim_start();
     if trimmed.is_empty() {
@@ -791,15 +808,8 @@ fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
 
     if tokens.len() == 1 && !trailing_space {
         let prefix = tokens[0];
-        let matches: Vec<&str> = crate::input::COMMANDS
-            .iter()
-            .copied()
-            .filter(|command| command.starts_with(prefix))
-            .collect();
-        if let Some(completion) = resolve_completion(prefix, &matches) {
-            let new_buffer = replace_tail(&buffer, prefix, &completion);
-            app.set_command_buffer(new_buffer);
-        }
+        let matches = collect_matches(crate::input::COMMANDS, prefix, |_| true);
+        apply_completion(app, &buffer, prefix, matches);
         return;
     }
 
@@ -810,25 +820,19 @@ fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
 
     if tokens[0] == "collector" {
         if tokens.len() == 1 && trailing_space {
-            if let Some(completion) = resolve_completion("", &COLLECTOR_ACTIONS) {
-                let mut new_buffer = buffer.to_string();
-                new_buffer.push_str(&completion);
-                app.set_command_buffer(new_buffer);
-            }
+            apply_completion(
+                app,
+                &buffer,
+                "",
+                COLLECTOR_ACTIONS.iter().map(|value| value.to_string()).collect(),
+            );
             return;
         }
 
         if tokens.len() == 2 && !trailing_space {
             let prefix = tokens[1];
-            let matches: Vec<&str> = COLLECTOR_ACTIONS
-                .iter()
-                .copied()
-                .filter(|action| action.starts_with(prefix))
-                .collect();
-            if let Some(completion) = resolve_completion(prefix, &matches) {
-                let new_buffer = replace_tail(&buffer, prefix, &completion);
-                app.set_command_buffer(new_buffer);
-            }
+            let matches = collect_matches(&COLLECTOR_ACTIONS, prefix, |_| true);
+            apply_completion(app, &buffer, prefix, matches);
             return;
         }
 
@@ -846,32 +850,19 @@ fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
 
     if tokens[0] == "map" {
         if tokens.len() == 2 && trailing_space {
-            let matches: Vec<&str> = crate::input::COMMANDS
-                .iter()
-                .copied()
-                .filter(|command| InputBindings::is_no_arg_command(command))
-                .collect();
-            if let Some(completion) = resolve_completion("", &matches) {
-                let mut new_buffer = buffer.to_string();
-                new_buffer.push_str(&completion);
-                app.set_command_buffer(new_buffer);
-            }
+            let matches = collect_matches(crate::input::COMMANDS, "", |command| {
+                InputBindings::is_no_arg_command(command)
+            });
+            apply_completion(app, &buffer, "", matches);
             return;
         }
 
         if tokens.len() == 3 && !trailing_space {
             let prefix = tokens[2];
-            let matches: Vec<&str> = crate::input::COMMANDS
-                .iter()
-                .copied()
-                .filter(|command| {
-                    command.starts_with(prefix) && InputBindings::is_no_arg_command(command)
-                })
-                .collect();
-            if let Some(completion) = resolve_completion(prefix, &matches) {
-                let new_buffer = replace_tail(&buffer, prefix, &completion);
-                app.set_command_buffer(new_buffer);
-            }
+            let matches = collect_matches(crate::input::COMMANDS, prefix, |command| {
+                InputBindings::is_no_arg_command(command)
+            });
+            apply_completion(app, &buffer, prefix, matches);
         }
     }
 }
@@ -884,76 +875,71 @@ fn complete_collector_argument(
     collectors: &[&'static str],
 ) {
     if tokens.len() == 1 && trailing_space {
-        if let Some(completion) = resolve_completion("", collectors) {
-            let mut new_buffer = buffer.to_string();
-            new_buffer.push_str(&completion);
-            app.set_command_buffer(new_buffer);
-        }
+        apply_completion(
+            app,
+            buffer,
+            "",
+            collectors.iter().copied().map(|value| value.to_string()).collect(),
+        );
         return;
     }
 
     if trailing_space && tokens.len() >= 2 {
-        if let Some(completion) = resolve_completion("", collectors) {
-            let mut new_buffer = buffer.to_string();
-            new_buffer.push_str(&completion);
-            app.set_command_buffer(new_buffer);
-        }
+        apply_completion(
+            app,
+            buffer,
+            "",
+            collectors.iter().copied().map(|value| value.to_string()).collect(),
+        );
         return;
     }
 
     if tokens.len() >= 2 && !trailing_space {
         let prefix = tokens[tokens.len() - 1];
-        let matches: Vec<&str> = collectors
+        let matches: Vec<String> = collectors
             .iter()
             .copied()
             .filter(|collector| collector.starts_with(prefix))
+            .map(|collector| collector.to_string())
             .collect();
-        if let Some(completion) = resolve_completion(prefix, &matches) {
-            let new_buffer = replace_tail(buffer, prefix, &completion);
-            app.set_command_buffer(new_buffer);
-        }
+        apply_completion(app, buffer, prefix, matches);
     }
 }
 
-fn resolve_completion(prefix: &str, matches: &[&str]) -> Option<String> {
+fn apply_completion(app: &mut AppState, buffer: &str, prefix: &str, matches: Vec<String>) {
     if matches.is_empty() {
-        return None;
+        return;
     }
 
-    let completion = if matches.len() == 1 {
-        matches[0].to_string()
-    } else {
-        common_prefix(matches)
-    };
+    let mut candidates = matches;
+    candidates.sort();
 
-    if completion.len() > prefix.len() {
-        Some(completion)
-    } else {
-        None
+    if candidates.len() == 1 {
+        let base = completion_base(buffer, prefix);
+        app.set_command_buffer(format!("{base}{}", candidates[0]));
+        return;
     }
+
+    let base = completion_base(buffer, prefix);
+    app.set_completion(base.clone(), candidates.clone());
+    app.set_command_buffer_from_completion(format!("{base}{}", candidates[0]));
 }
 
-fn common_prefix(matches: &[&str]) -> String {
-    let first = matches[0].as_bytes();
-    let mut length = first.len();
-    for entry in matches.iter().skip(1) {
-        let bytes = entry.as_bytes();
-        length = length.min(bytes.len());
-        for i in 0..length {
-            if bytes[i] != first[i] {
-                length = i;
-                break;
-            }
-        }
-    }
-    String::from_utf8_lossy(&first[..length]).to_string()
-}
-
-fn replace_tail(buffer: &str, prefix: &str, completion: &str) -> String {
+fn completion_base(buffer: &str, prefix: &str) -> String {
     let cut = buffer.len().saturating_sub(prefix.len());
-    let mut new_buffer = buffer.to_string();
-    new_buffer.replace_range(cut.., completion);
-    new_buffer
+    buffer[..cut].to_string()
+}
+
+fn collect_matches<F>(entries: &[&str], prefix: &str, predicate: F) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    entries
+        .iter()
+        .copied()
+        .filter(|entry| entry.starts_with(prefix) && predicate(entry))
+        .map(|entry| entry.to_string())
+        .collect()
 }
 
 fn parse_dashboard_index(value: &str) -> Result<usize, String> {
