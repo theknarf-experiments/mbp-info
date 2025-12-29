@@ -2,9 +2,15 @@ mod collector;
 mod data;
 mod tui;
 
+use std::collections::HashMap;
 use std::io;
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, Sender},
+    Arc,
+};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crossterm::{
@@ -14,24 +20,35 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use crate::collector::{needs_sudo, spawn_powermetrics, CollectorMessage, COLLECTORS};
+use crate::collector::{
+    needs_sudo, spawn_collector, Collector, CollectorMessage, CpuInfoCollector,
+    CpuUsageCollector, GpuInfoCollector, MemoryInfoCollector, MemoryUsageCollector,
+    OsVersionCollector, PowermetricsCollector, SwapUsageCollector, UptimeCollector,
+};
 use crate::data::DataStore;
 use crate::tui::{draw_ui, AppState, FocusPanel};
 
-const COMMANDS: [&str; 5] = ["q", "quit", "reauth", "help", "collectors"];
+const COMMANDS: [&str; 6] = ["q", "quit", "help", "collectors", "collector", "reauth"];
+const COLLECTOR_ACTIONS: [&str; 2] = ["on", "off"];
 
 fn main() -> io::Result<()> {
     if !cfg!(target_os = "macos") {
-        eprintln!("mbp-info only supports macOS powermetrics.");
+        eprintln!("mbp-info only supports macOS collectors.");
         return Ok(());
     }
 
     let use_sudo = needs_sudo();
-    if use_sudo {
-        let ok = prompt_for_sudo("mbp-info needs sudo to run powermetrics. You'll be prompted now.")?;
-        if !ok {
-            eprintln!("sudo failed or was cancelled.");
-            return Ok(());
+    let registrations = register_collectors(use_sudo);
+    let mut sudo_ready = false;
+    let mut startup_message = None;
+
+    if use_sudo && registrations.iter().any(|reg| reg.requires_sudo) {
+        sudo_ready = prompt_for_sudo("Some collectors need sudo. Authenticate now?")?;
+        if !sudo_ready {
+            startup_message = Some(
+                "Sudo collectors disabled. Use :reauth <collector> then :collector on <collector>."
+                    .to_string(),
+            );
         }
     }
 
@@ -43,9 +60,14 @@ fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let (tx, rx) = mpsc::channel();
-    spawn_powermetrics(tx, use_sudo);
+    let mut manager = CollectorManager::new(registrations, tx);
+    if let Some(message) = start_default_collectors(&mut manager, use_sudo, sudo_ready) {
+        if startup_message.is_none() {
+            startup_message = Some(message);
+        }
+    }
 
-    let result = run_app(&mut terminal, rx, use_sudo);
+    let result = run_app(&mut terminal, rx, manager, use_sudo, sudo_ready, startup_message);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -61,21 +83,30 @@ fn main() -> io::Result<()> {
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     rx: Receiver<CollectorMessage>,
+    mut manager: CollectorManager,
     use_sudo: bool,
+    mut sudo_ready: bool,
+    startup_message: Option<String>,
 ) -> io::Result<()> {
     let mut data = DataStore::new();
     let mut app = AppState::new();
+    if let Some(message) = startup_message {
+        app.set_message(Some(message));
+    }
+
     let tick_rate = Duration::from_millis(200);
 
     loop {
         while let Ok(message) = rx.try_recv() {
             match message {
-                CollectorMessage::Sample(sample) => {
+                CollectorMessage::Sample { data: sample } => {
                     data.apply_sample(sample);
                     app.clamp_selection(&data);
                     app.set_error(None);
                 }
-                CollectorMessage::Error(error) => app.set_error(Some(error)),
+                CollectorMessage::Error { collector, error } => {
+                    app.set_error(Some(format!("{collector}: {error}")));
+                }
             }
         }
 
@@ -88,7 +119,14 @@ fn run_app(
                 }
 
                 if app.is_command_mode() {
-                    if handle_command_input(key.code, &mut app, terminal, use_sudo)? {
+                    if handle_command_input(
+                        key.code,
+                        &mut app,
+                        terminal,
+                        &mut manager,
+                        use_sudo,
+                        &mut sudo_ready,
+                    )? {
                         return Ok(());
                     }
                     continue;
@@ -126,6 +164,47 @@ fn run_app(
     }
 }
 
+fn start_default_collectors(
+    manager: &mut CollectorManager,
+    use_sudo: bool,
+    sudo_ready: bool,
+) -> Option<String> {
+    let mut message = None;
+
+    let registrations: Vec<(&'static str, bool)> = manager
+        .registrations()
+        .iter()
+        .map(|registration| (registration.id, registration.requires_sudo))
+        .collect();
+
+    for (id, requires_sudo) in registrations {
+        if requires_sudo && use_sudo && !sudo_ready {
+            continue;
+        }
+        if let Err(error) = manager.enable(id) {
+            message = Some(format!("Failed to start {id}: {error}"));
+        }
+    }
+
+    message
+}
+
+fn register_collectors(use_sudo: bool) -> Vec<CollectorRegistration> {
+    vec![
+        CollectorRegistration::new(Box::new(move || {
+            Box::new(PowermetricsCollector::new(use_sudo))
+        })),
+        CollectorRegistration::new(Box::new(|| Box::new(CpuUsageCollector::new()))),
+        CollectorRegistration::new(Box::new(|| Box::new(MemoryUsageCollector::new()))),
+        CollectorRegistration::new(Box::new(|| Box::new(SwapUsageCollector::new()))),
+        CollectorRegistration::new(Box::new(|| Box::new(UptimeCollector::new()))),
+        CollectorRegistration::new(Box::new(|| Box::new(CpuInfoCollector::new()))),
+        CollectorRegistration::new(Box::new(|| Box::new(MemoryInfoCollector::new()))),
+        CollectorRegistration::new(Box::new(|| Box::new(GpuInfoCollector::new()))),
+        CollectorRegistration::new(Box::new(|| Box::new(OsVersionCollector::new()))),
+    ]
+}
+
 fn prompt_for_sudo(message: &str) -> io::Result<bool> {
     if !message.is_empty() {
         println!("{message}");
@@ -152,25 +231,34 @@ fn resume_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Resu
 fn reauthenticate(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut AppState,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     suspend_tui(terminal)?;
-    let result = prompt_for_sudo("Re-authenticate sudo for powermetrics:");
+    let result = prompt_for_sudo("Re-authenticate sudo for collectors:");
     resume_tui(terminal)?;
 
     match result {
-        Ok(true) => app.set_error(None),
-        Ok(false) => app.set_error(Some("sudo failed or was cancelled.".to_string())),
-        Err(error) => app.set_error(Some(format!("sudo error: {error}"))),
+        Ok(true) => {
+            app.set_message(Some("sudo authenticated".to_string()));
+            Ok(true)
+        }
+        Ok(false) => {
+            app.set_error(Some("sudo failed or was cancelled.".to_string()));
+            Ok(false)
+        }
+        Err(error) => {
+            app.set_error(Some(format!("sudo error: {error}")));
+            Ok(false)
+        }
     }
-
-    Ok(())
 }
 
 fn handle_command_input(
     code: KeyCode,
     app: &mut AppState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    manager: &mut CollectorManager,
     use_sudo: bool,
+    sudo_ready: &mut bool,
 ) -> io::Result<bool> {
     match code {
         KeyCode::Esc => {
@@ -180,7 +268,7 @@ fn handle_command_input(
             let command = app.take_command();
             app.exit_command_mode();
             app.record_command(&command);
-            return run_command(&command, app, terminal, use_sudo);
+            return run_command(command.trim(), app, terminal, manager, use_sudo, sudo_ready);
         }
         KeyCode::Up => {
             app.history_prev();
@@ -189,7 +277,8 @@ fn handle_command_input(
             app.history_next();
         }
         KeyCode::Tab => {
-            complete_command_buffer(app);
+            let collector_ids = manager.collector_ids();
+            complete_command_buffer(app, &collector_ids);
         }
         KeyCode::Backspace => {
             app.pop_command_char();
@@ -207,7 +296,9 @@ fn run_command(
     command: &str,
     app: &mut AppState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    manager: &mut CollectorManager,
     use_sudo: bool,
+    sudo_ready: &mut bool,
 ) -> io::Result<bool> {
     let mut parts = command.split_whitespace();
     let Some(root) = parts.next() else {
@@ -218,16 +309,54 @@ fn run_command(
         "q" | "quit" => Ok(true),
         "help" => {
             app.set_message(Some(
-                "Commands: :q, :help, :collectors, :reauth <collector>".to_string(),
+                "Commands: :q, :help, :collectors, :collector on/off <id>, :reauth <collector>"
+                    .to_string(),
             ));
             Ok(false)
         }
         "collectors" => {
-            app.set_message(Some(format!(
-                "Collectors: {}",
-                COLLECTORS.join(", ")
-            )));
+            app.set_message(Some(manager.describe_collectors()));
             Ok(false)
+        }
+        "collector" => {
+            let action = parts.next().unwrap_or_default();
+            let id = parts.next().unwrap_or_default();
+            if action.is_empty() || id.is_empty() {
+                app.set_error(Some("Usage: :collector on|off <id>".to_string()));
+                return Ok(false);
+            }
+
+            match action {
+                "on" | "enable" | "start" => {
+                    if manager.is_enabled(id) {
+                        app.set_message(Some(format!("Collector '{id}' already enabled.")));
+                        return Ok(false);
+                    }
+                    if manager.requires_sudo(id).unwrap_or(false) && use_sudo && !*sudo_ready {
+                        if reauthenticate(terminal, app)? {
+                            *sudo_ready = true;
+                        } else {
+                            return Ok(false);
+                        }
+                    }
+                    match manager.enable(id) {
+                        Ok(()) => app.set_message(Some(format!("Collector '{id}' enabled."))),
+                        Err(error) => app.set_error(Some(error)),
+                    }
+                    Ok(false)
+                }
+                "off" | "disable" | "stop" => {
+                    match manager.disable(id) {
+                        Ok(()) => app.set_message(Some(format!("Collector '{id}' disabled."))),
+                        Err(error) => app.set_error(Some(error)),
+                    }
+                    Ok(false)
+                }
+                _ => {
+                    app.set_error(Some("Usage: :collector on|off <id>".to_string()));
+                    Ok(false)
+                }
+            }
         }
         "reauth" => {
             let collector = parts.next().unwrap_or_default();
@@ -235,14 +364,23 @@ fn run_command(
                 app.set_error(Some("Usage: :reauth <collector>".to_string()));
                 return Ok(false);
             }
-            if collector == "powermetrics" {
-                if use_sudo {
-                    reauthenticate(terminal, app)?;
-                } else {
-                    app.set_error(Some("Already running without sudo.".to_string()));
+            match manager.requires_sudo(collector) {
+                Some(true) => {
+                    if use_sudo {
+                        let ok = reauthenticate(terminal, app)?;
+                        *sudo_ready = ok;
+                    } else {
+                        app.set_error(Some("Already running without sudo.".to_string()));
+                    }
                 }
-            } else {
-                app.set_error(Some(format!("Unknown collector: {collector}")));
+                Some(false) => {
+                    app.set_message(Some(format!(
+                        "Collector '{collector}' does not require sudo."
+                    )));
+                }
+                None => {
+                    app.set_error(Some(format!("Unknown collector: {collector}")));
+                }
             }
             Ok(false)
         }
@@ -253,8 +391,8 @@ fn run_command(
     }
 }
 
-fn complete_command_buffer(app: &mut AppState) {
-    let buffer = app.command_buffer();
+fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
+    let buffer = app.command_buffer().to_string();
     let trimmed = buffer.trim_start();
     if trimmed.is_empty() {
         return;
@@ -274,16 +412,20 @@ fn complete_command_buffer(app: &mut AppState) {
             .filter(|command| command.starts_with(prefix))
             .collect();
         if let Some(completion) = resolve_completion(prefix, &matches) {
-            let new_buffer = replace_tail(buffer, prefix, &completion);
+            let new_buffer = replace_tail(&buffer, prefix, &completion);
             app.set_command_buffer(new_buffer);
         }
         return;
     }
 
     if tokens[0] == "reauth" {
+        complete_collector_argument(app, &buffer, tokens.as_slice(), trailing_space, collectors);
+        return;
+    }
+
+    if tokens[0] == "collector" {
         if tokens.len() == 1 && trailing_space {
-            let matches: Vec<&str> = COLLECTORS.iter().copied().collect();
-            if let Some(completion) = resolve_completion("", &matches) {
+            if let Some(completion) = resolve_completion("", &COLLECTOR_ACTIONS) {
                 let mut new_buffer = buffer.to_string();
                 new_buffer.push_str(&completion);
                 app.set_command_buffer(new_buffer);
@@ -291,17 +433,61 @@ fn complete_command_buffer(app: &mut AppState) {
             return;
         }
 
-        if tokens.len() >= 2 && !trailing_space {
-            let prefix = tokens[tokens.len() - 1];
-            let matches: Vec<&str> = COLLECTORS
+        if tokens.len() == 2 && !trailing_space {
+            let prefix = tokens[1];
+            let matches: Vec<&str> = COLLECTOR_ACTIONS
                 .iter()
                 .copied()
-                .filter(|collector| collector.starts_with(prefix))
+                .filter(|action| action.starts_with(prefix))
                 .collect();
             if let Some(completion) = resolve_completion(prefix, &matches) {
-                let new_buffer = replace_tail(buffer, prefix, &completion);
+                let new_buffer = replace_tail(&buffer, prefix, &completion);
                 app.set_command_buffer(new_buffer);
             }
+            return;
+        }
+
+        if tokens.len() >= 2 {
+            complete_collector_argument(app, &buffer, tokens.as_slice(), trailing_space, collectors);
+        }
+    }
+}
+
+fn complete_collector_argument(
+    app: &mut AppState,
+    buffer: &str,
+    tokens: &[&str],
+    trailing_space: bool,
+    collectors: &[&'static str],
+) {
+    if tokens.len() == 1 && trailing_space {
+        if let Some(completion) = resolve_completion("", collectors) {
+            let mut new_buffer = buffer.to_string();
+            new_buffer.push_str(&completion);
+            app.set_command_buffer(new_buffer);
+        }
+        return;
+    }
+
+    if trailing_space && tokens.len() >= 2 {
+        if let Some(completion) = resolve_completion("", collectors) {
+            let mut new_buffer = buffer.to_string();
+            new_buffer.push_str(&completion);
+            app.set_command_buffer(new_buffer);
+        }
+        return;
+    }
+
+    if tokens.len() >= 2 && !trailing_space {
+        let prefix = tokens[tokens.len() - 1];
+        let matches: Vec<&str> = collectors
+            .iter()
+            .copied()
+            .filter(|collector| collector.starts_with(prefix))
+            .collect();
+        if let Some(completion) = resolve_completion(prefix, &matches) {
+            let new_buffer = replace_tail(buffer, prefix, &completion);
+            app.set_command_buffer(new_buffer);
         }
     }
 }
@@ -404,5 +590,121 @@ fn move_focus_vertical(app: &mut AppState, is_wide: bool, up: bool) {
             (current + 1).min(order.len() - 1)
         };
         app.set_focus(order[next]);
+    }
+}
+
+struct CollectorRegistration {
+    id: &'static str,
+    name: &'static str,
+    requires_sudo: bool,
+    factory: Box<dyn Fn() -> Box<dyn Collector> + Send + Sync>,
+}
+
+impl CollectorRegistration {
+    fn new(factory: Box<dyn Fn() -> Box<dyn Collector> + Send + Sync>) -> Self {
+        let collector = factory();
+        Self {
+            id: collector.id(),
+            name: collector.name(),
+            requires_sudo: collector.requires_sudo(),
+            factory,
+        }
+    }
+}
+
+struct CollectorHandle {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+struct CollectorManager {
+    registrations: Vec<CollectorRegistration>,
+    running: HashMap<&'static str, CollectorHandle>,
+    tx: Sender<CollectorMessage>,
+}
+
+impl CollectorManager {
+    fn new(registrations: Vec<CollectorRegistration>, tx: Sender<CollectorMessage>) -> Self {
+        Self {
+            registrations,
+            running: HashMap::new(),
+            tx,
+        }
+    }
+
+    fn registrations(&self) -> &[CollectorRegistration] {
+        &self.registrations
+    }
+
+    fn collector_ids(&self) -> Vec<&'static str> {
+        self.registrations.iter().map(|reg| reg.id).collect()
+    }
+
+    fn requires_sudo(&self, id: &str) -> Option<bool> {
+        self.registrations
+            .iter()
+            .find(|reg| reg.id == id)
+            .map(|reg| reg.requires_sudo)
+    }
+
+    fn is_enabled(&self, id: &str) -> bool {
+        self.running.contains_key(id)
+    }
+
+    fn enable(&mut self, id: &str) -> Result<(), String> {
+        if self.running.contains_key(id) {
+            return Err(format!("Collector '{id}' already enabled."));
+        }
+
+        let reg = self
+            .registrations
+            .iter()
+            .find(|reg| reg.id == id)
+            .ok_or_else(|| format!("Unknown collector: {id}"))?;
+
+        let collector = (reg.factory)();
+        let stop = Arc::new(AtomicBool::new(true));
+        let handle = spawn_collector(collector, self.tx.clone(), stop.clone());
+
+        self.running.insert(
+            reg.id,
+            CollectorHandle {
+                stop,
+                join: Some(handle),
+            },
+        );
+
+        Ok(())
+    }
+
+    fn disable(&mut self, id: &str) -> Result<(), String> {
+        let mut handle = self
+            .running
+            .remove(id)
+            .ok_or_else(|| format!("Collector '{id}' is not enabled."))?;
+
+        handle.stop.store(false, Ordering::Relaxed);
+        if let Some(join) = handle.join.take() {
+            let _ = join.join();
+        }
+
+        Ok(())
+    }
+
+    fn describe_collectors(&self) -> String {
+        let mut entries = Vec::new();
+        for reg in &self.registrations {
+            let status = if self.running.contains_key(reg.id) {
+                "on"
+            } else {
+                "off"
+            };
+            let sudo = if reg.requires_sudo { " sudo" } else { "" };
+            entries.push(format!(
+                "{} - {} ({status}{sudo})",
+                reg.id, reg.name
+            ));
+        }
+        format!("Collectors: {}", entries.join(", "))
     }
 }
