@@ -30,7 +30,7 @@ use crate::collector::{
 use crate::data::{CollectorRegistration, DashboardStore, DataStore, SeriesValue};
 use crate::input::InputBindings;
 use crate::query::{Query, QueryProvider, QueryResult, QueryRow, QuerySource, SeriesMode};
-use crate::tui::{draw_ui, panel_at, rows_from_query, AppState, FocusPanel};
+use crate::tui::{draw_ui, panel_at, rows_from_query, AppState, FocusPanel, NoticeAction};
 
 const COLLECTOR_ACTIONS: [&str; 2] = ["on", "off"];
 
@@ -163,6 +163,12 @@ fn run_app(
                                 app.clear_notice();
                                 input.clear_pending();
                                 continue;
+                            }
+                            KeyCode::Enter => {
+                                if handle_notice_enter(&mut app, &mut dashboards) {
+                                    input.clear_pending();
+                                    continue;
+                                }
                             }
                             _ => {}
                         }
@@ -615,7 +621,7 @@ fn execute_named_command(
             };
             let result = dashboards.query(query);
             let rows = rows_from_query(&result);
-            app.set_notice(&result.title, rows, false);
+            app.set_notice_with_action(&result.title, rows, false, NoticeAction::DashboardGoto);
             Ok(false)
         }
         "dashboard_new" => {
@@ -940,6 +946,20 @@ where
         .filter(|entry| entry.starts_with(prefix) && predicate(entry))
         .map(|entry| entry.to_string())
         .collect()
+}
+
+fn handle_notice_enter(app: &mut AppState, dashboards: &mut DashboardStore) -> bool {
+    match app.notice_action() {
+        Some(NoticeAction::DashboardGoto) => {
+            let index = app.notice_selected();
+            match dashboards.set_active(index) {
+                Ok(()) => app.clear_notice(),
+                Err(error) => app.set_error(Some(error)),
+            }
+            true
+        }
+        None => false,
+    }
 }
 
 fn parse_dashboard_index(value: &str) -> Result<usize, String> {

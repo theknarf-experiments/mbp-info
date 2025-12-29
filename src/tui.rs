@@ -45,6 +45,12 @@ struct Notice {
     rows: Vec<Vec<String>>,
     selected: usize,
     is_error: bool,
+    on_enter: Option<NoticeAction>,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum NoticeAction {
+    DashboardGoto,
 }
 
 struct CompletionState {
@@ -343,6 +349,24 @@ impl AppState {
             rows,
             selected,
             is_error,
+            on_enter: None,
+        });
+    }
+
+    pub fn set_notice_with_action(
+        &mut self,
+        title: &str,
+        rows: Vec<Vec<String>>,
+        is_error: bool,
+        on_enter: NoticeAction,
+    ) {
+        let selected = if rows.is_empty() { 0 } else { 0 };
+        self.notice = Some(Notice {
+            title: title.to_string(),
+            rows,
+            selected,
+            is_error,
+            on_enter: Some(on_enter),
         });
     }
 
@@ -366,6 +390,10 @@ impl AppState {
             .as_ref()
             .map(|notice| notice.is_error)
             .unwrap_or(false)
+    }
+
+    pub fn notice_action(&self) -> Option<NoticeAction> {
+        self.notice.as_ref().and_then(|notice| notice.on_enter)
     }
 
     pub fn select_notice_next(&mut self) {
