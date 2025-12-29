@@ -25,6 +25,7 @@ pub const COMMANDS: &[&str] = &[
     "reauth",
     "map",
     "unmap",
+    "maps",
     "jump_to_first_row",
     "jump_to_last_row",
     "cursor_up",
@@ -39,6 +40,7 @@ const MAPPABLE_COMMANDS: &[&str] = &[
     "quit",
     "help",
     "collectors",
+    "maps",
     "jump_to_first_row",
     "jump_to_last_row",
     "cursor_up",
@@ -53,6 +55,7 @@ const NO_ARG_COMMANDS: &[&str] = &[
     "quit",
     "help",
     "collectors",
+    "maps",
     "jump_to_first_row",
     "jump_to_last_row",
     "cursor_up",
@@ -139,6 +142,26 @@ impl InputBindings {
             return false;
         };
         NO_ARG_COMMANDS.contains(&canonical)
+    }
+
+    pub fn format_mappings(&self) -> String {
+        if self.map.is_empty() {
+            return "No key mappings.".to_string();
+        }
+
+        let mut entries: Vec<(String, String)> = self
+            .map
+            .iter()
+            .map(|(sequence, command)| (format_sequence(sequence), command.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let rendered: Vec<String> = entries
+            .iter()
+            .map(|(sequence, command)| format!("{sequence} -> {command}"))
+            .collect();
+
+        format!("Mappings: {}", rendered.join(", "))
     }
 
     fn lookup_exact(&self, tokens: &[KeyToken]) -> Option<String> {
@@ -269,6 +292,7 @@ fn canonical_command(command: &str) -> Option<&'static str> {
         "reauth" => Some("reauth"),
         "map" => Some("map"),
         "unmap" => Some("unmap"),
+        "maps" => Some("maps"),
         "jump_to_first_row" => Some("jump_to_first_row"),
         "jump_to_last_row" => Some("jump_to_last_row"),
         "cursor_up" => Some("cursor_up"),
@@ -283,4 +307,27 @@ fn canonical_command(command: &str) -> Option<&'static str> {
 
 fn is_mappable_command(command: &str) -> bool {
     MAPPABLE_COMMANDS.contains(&command)
+}
+
+fn format_sequence(sequence: &[KeyToken]) -> String {
+    let mut output = String::new();
+    for token in sequence {
+        output.push_str(&format_token(token));
+    }
+    output
+}
+
+fn format_token(token: &KeyToken) -> String {
+    match token {
+        KeyToken::Char(ch) => ch.to_string(),
+        KeyToken::Ctrl(ch) => format!("<c-{ch}>"),
+        KeyToken::Up => "<up>".to_string(),
+        KeyToken::Down => "<down>".to_string(),
+        KeyToken::Left => "<left>".to_string(),
+        KeyToken::Right => "<right>".to_string(),
+        KeyToken::Esc => "<esc>".to_string(),
+        KeyToken::Enter => "<enter>".to_string(),
+        KeyToken::Tab => "<tab>".to_string(),
+        KeyToken::Backspace => "<bs>".to_string(),
+    }
 }

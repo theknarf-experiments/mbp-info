@@ -161,6 +161,7 @@ fn run_app(
                                 &data,
                                 terminal,
                                 &mut manager,
+                                &input,
                             )? {
                                 return Ok(());
                             }
@@ -395,8 +396,12 @@ fn run_command(
         }
         "map" => {
             let sequence = parts.next().unwrap_or_default();
+            if sequence.is_empty() {
+                app.set_message(Some(input.format_mappings()));
+                return Ok(false);
+            }
             let command = parts.next().unwrap_or_default();
-            if sequence.is_empty() || command.is_empty() {
+            if command.is_empty() {
                 app.set_error(Some("Usage: :map <keys> <command>".to_string()));
                 return Ok(false);
             }
@@ -422,12 +427,16 @@ fn run_command(
             }
             Ok(false)
         }
+        "maps" => {
+            app.set_message(Some(input.format_mappings()));
+            Ok(false)
+        }
         _ if InputBindings::is_no_arg_command(root) => {
             if parts.next().is_some() {
                 app.set_error(Some(format!(":{root} does not take arguments.")));
                 return Ok(false);
             }
-            execute_named_command(root, app, data, terminal, manager)
+            execute_named_command(root, app, data, terminal, manager, input)
         }
         _ => {
             app.set_error(Some(format!("Unknown command: {root}")));
@@ -442,6 +451,7 @@ fn execute_named_command(
     data: &DataStore,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     manager: &mut CollectorManager,
+    input: &InputBindings,
 ) -> io::Result<bool> {
     match command {
         "q" | "quit" => Ok(true),
@@ -451,6 +461,10 @@ fn execute_named_command(
         }
         "collectors" => {
             app.set_message(Some(manager.describe_collectors()));
+            Ok(false)
+        }
+        "maps" => {
+            app.set_message(Some(input.format_mappings()));
             Ok(false)
         }
         "jump_to_first_row" => {
@@ -492,7 +506,7 @@ fn execute_named_command(
 
 fn build_help_text() -> String {
     "Commands: :q, :help, :collectors, :collector on/off <id>, :reauth <collector>, \
-:map <keys> <command>, :unmap <keys>, :jump_to_first_row, :jump_to_last_row, \
+:map <keys> <command>, :unmap <keys>, :maps, :jump_to_first_row, :jump_to_last_row, \
 :cursor_up, :cursor_down, :panel_navigate_left/right/up/down"
         .to_string()
 }
