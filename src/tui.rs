@@ -408,93 +408,30 @@ pub fn draw_ui(
     app: &AppState,
 ) {
     let size = frame.size();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(size);
+    let areas = panel_areas(size);
 
-    if size.width < 90 {
-        let body_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(30),
-                Constraint::Percentage(30),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-            ])
-            .split(chunks[0]);
-
-        let metrics_area = body_chunks[0];
-        let chart_area = body_chunks[1];
-        let info_area = body_chunks[2];
-        let collectors_area = body_chunks[3];
-
-        draw_metrics_list(
-            frame,
-            data,
-            app,
-            app.focus() == FocusPanel::Metrics,
-            metrics_area,
-        );
-        draw_chart(
-            frame,
-            data,
-            app,
-            app.focus() == FocusPanel::Chart,
-            chart_area,
-        );
-        draw_info_panel(frame, data, app, app.focus() == FocusPanel::Info, info_area);
-        draw_collectors_panel(
-            frame,
-            collectors,
-            app,
-            app.focus() == FocusPanel::Collectors,
-            collectors_area,
-        );
-    } else {
-        let body_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-            .split(chunks[0]);
-
-        let left_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(body_chunks[0]);
-
-        let right_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(body_chunks[1]);
-
-        let metrics_area = left_chunks[0];
-        let collectors_area = left_chunks[1];
-        let chart_area = right_chunks[0];
-        let info_area = right_chunks[1];
-
-        draw_metrics_list(
-            frame,
-            data,
-            app,
-            app.focus() == FocusPanel::Metrics,
-            metrics_area,
-        );
-        draw_collectors_panel(
-            frame,
-            collectors,
-            app,
-            app.focus() == FocusPanel::Collectors,
-            collectors_area,
-        );
-        draw_chart(
-            frame,
-            data,
-            app,
-            app.focus() == FocusPanel::Chart,
-            chart_area,
-        );
-        draw_info_panel(frame, data, app, app.focus() == FocusPanel::Info, info_area);
-    }
+    draw_metrics_list(
+        frame,
+        data,
+        app,
+        app.focus() == FocusPanel::Metrics,
+        areas.metrics,
+    );
+    draw_chart(
+        frame,
+        data,
+        app,
+        app.focus() == FocusPanel::Chart,
+        areas.chart,
+    );
+    draw_info_panel(frame, data, app, app.focus() == FocusPanel::Info, areas.info);
+    draw_collectors_panel(
+        frame,
+        collectors,
+        app,
+        app.focus() == FocusPanel::Collectors,
+        areas.collectors,
+    );
 
     if let Some(rows) = app.notice_rows() {
         if let Some(title) = app.notice_title() {
@@ -509,7 +446,90 @@ pub fn draw_ui(
         }
     }
 
-    draw_command_bar(frame, app, chunks[1]);
+    draw_command_bar(frame, app, areas.command);
+}
+
+pub(crate) struct PanelAreas {
+    pub metrics: Rect,
+    pub chart: Rect,
+    pub info: Rect,
+    pub collectors: Rect,
+    pub command: Rect,
+}
+
+pub(crate) fn panel_areas(size: Rect) -> PanelAreas {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(size);
+    let command = chunks[1];
+
+    if size.width < 90 {
+        let body_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(30),
+                Constraint::Percentage(30),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+            ])
+            .split(chunks[0]);
+
+        return PanelAreas {
+            metrics: body_chunks[0],
+            chart: body_chunks[1],
+            info: body_chunks[2],
+            collectors: body_chunks[3],
+            command,
+        };
+    }
+
+    let body_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(chunks[0]);
+
+    let left_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(body_chunks[0]);
+
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+        .split(body_chunks[1]);
+
+    PanelAreas {
+        metrics: left_chunks[0],
+        collectors: left_chunks[1],
+        chart: right_chunks[0],
+        info: right_chunks[1],
+        command,
+    }
+}
+
+pub(crate) fn panel_at(size: Rect, x: u16, y: u16) -> Option<FocusPanel> {
+    let areas = panel_areas(size);
+    if point_in_rect(areas.metrics, x, y) {
+        return Some(FocusPanel::Metrics);
+    }
+    if point_in_rect(areas.chart, x, y) {
+        return Some(FocusPanel::Chart);
+    }
+    if point_in_rect(areas.info, x, y) {
+        return Some(FocusPanel::Info);
+    }
+    if point_in_rect(areas.collectors, x, y) {
+        return Some(FocusPanel::Collectors);
+    }
+    None
+}
+
+fn point_in_rect(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
 }
 
 fn draw_metrics_list(

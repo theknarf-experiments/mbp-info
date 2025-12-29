@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -30,7 +30,7 @@ use crate::collector::{
 use crate::data::{CollectorRegistration, DataStore, SeriesValue};
 use crate::input::InputBindings;
 use crate::query::{Query, QueryProvider, QueryResult, QueryRow, QuerySource, SeriesMode};
-use crate::tui::{draw_ui, rows_from_query, AppState, FocusPanel};
+use crate::tui::{draw_ui, panel_at, rows_from_query, AppState, FocusPanel};
 
 const COLLECTOR_ACTIONS: [&str; 2] = ["on", "off"];
 
@@ -57,7 +57,7 @@ fn main() -> io::Result<()> {
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -80,7 +80,7 @@ fn main() -> io::Result<()> {
     );
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     if let Err(error) = result {
@@ -128,63 +128,104 @@ fn run_app(
         terminal.draw(|frame| draw_ui(frame, &data, &manager, &app))?;
 
         if event::poll(tick_rate)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-
-                if app.is_command_mode() {
-                    if handle_command_input(
-                        key.code,
-                        &mut app,
-                        &mut input,
-                        &data,
-                        terminal,
-                        &mut manager,
-                        use_sudo,
-                        &mut sudo_ready,
-                    )? {
-                        return Ok(());
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
                     }
-                    continue;
-                }
 
-                if app.has_notice() {
+                    if app.is_command_mode() {
+                        if handle_command_input(
+                            key.code,
+                            &mut app,
+                            &mut input,
+                            &data,
+                            terminal,
+                            &mut manager,
+                            use_sudo,
+                            &mut sudo_ready,
+                        )? {
+                            return Ok(());
+                        }
+                        continue;
+                    }
+
+                    if app.has_notice() {
+                        match key.code {
+                            KeyCode::Esc => {
+                                app.clear_notice();
+                                input.clear_pending();
+                                continue;
+                            }
+                            KeyCode::Char('q') if key.modifiers.is_empty() => {
+                                app.clear_notice();
+                                input.clear_pending();
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
                     match key.code {
-                        KeyCode::Esc => {
-                            app.clear_notice();
+                        KeyCode::Char(':') => {
+                            app.enter_command_mode();
                             input.clear_pending();
-                            continue;
                         }
-                        KeyCode::Char('q') if key.modifiers.is_empty() => {
-                            app.clear_notice();
-                            input.clear_pending();
-                            continue;
+                        _ => {
+                            if let Some(command) = input.resolve(key) {
+                                if execute_named_command(
+                                    &command,
+                                    &mut app,
+                                    &data,
+                                    terminal,
+                                    &mut manager,
+                                    &input,
+                                )? {
+                                    return Ok(());
+                                }
+                            }
                         }
-                        _ => {}
                     }
                 }
-
-                match key.code {
-                    KeyCode::Char(':') => {
-                        app.enter_command_mode();
-                        input.clear_pending();
+                Event::Mouse(mouse) => {
+                    if app.is_command_mode() {
+                        continue;
                     }
-                    _ => {
-                        if let Some(command) = input.resolve(key) {
-                            if execute_named_command(
-                                &command,
+
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            execute_named_command(
+                                "cursor_up",
                                 &mut app,
                                 &data,
                                 terminal,
                                 &mut manager,
                                 &input,
-                            )? {
-                                return Ok(());
+                            )?;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            execute_named_command(
+                                "cursor_down",
+                                &mut app,
+                                &data,
+                                terminal,
+                                &mut manager,
+                                &input,
+                            )?;
+                        }
+                        MouseEventKind::Down(_) => {
+                            if app.has_notice() {
+                                continue;
+                            }
+                            let size = terminal.size()?;
+                            if let Some(panel) = panel_at(size, mouse.column, mouse.row) {
+                                app.set_focus(panel);
                             }
                         }
+                        _ => {}
                     }
                 }
+                _ => {}
             }
         }
     }
@@ -242,13 +283,13 @@ fn prompt_for_sudo(message: &str) -> io::Result<bool> {
 
 fn suspend_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
 }
 
 fn resume_tui(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
     enable_raw_mode()?;
     terminal.clear()?;
     Ok(())
