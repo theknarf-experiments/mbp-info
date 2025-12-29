@@ -5,6 +5,7 @@ pub enum QuerySource {
     Metrics,
     StaticInfo,
     Collectors,
+    Dashboards,
 }
 
 #[derive(Copy, Clone, Debug)]

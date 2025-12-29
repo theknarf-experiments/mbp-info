@@ -27,7 +27,7 @@ use crate::collector::{
     GpuInfoCollector, MemoryInfoCollector, MemoryUsageCollector, OsVersionCollector,
     PowermetricsCollector, SwapUsageCollector, UptimeCollector,
 };
-use crate::data::{CollectorRegistration, DataStore, SeriesValue};
+use crate::data::{CollectorRegistration, DashboardStore, DataStore, SeriesValue};
 use crate::input::InputBindings;
 use crate::query::{Query, QueryProvider, QueryResult, QueryRow, QuerySource, SeriesMode};
 use crate::tui::{draw_ui, panel_at, rows_from_query, AppState, FocusPanel};
@@ -99,6 +99,7 @@ fn run_app(
     startup_message: Option<String>,
 ) -> io::Result<()> {
     let mut data = DataStore::new();
+    let mut dashboards = DashboardStore::new();
     let mut app = AppState::new();
     let mut input = InputBindings::new();
     if let Some(message) = startup_message {
@@ -125,7 +126,7 @@ fn run_app(
         }
 
         app.set_collectors_count(manager.collector_count());
-        terminal.draw(|frame| draw_ui(frame, &data, &manager, &app))?;
+        terminal.draw(|frame| draw_ui(frame, &data, &manager, &dashboards, &app))?;
 
         if event::poll(tick_rate)? {
             match event::read()? {
@@ -140,6 +141,7 @@ fn run_app(
                             &mut app,
                             &mut input,
                             &data,
+                            &mut dashboards,
                             terminal,
                             &mut manager,
                             use_sudo,
@@ -177,6 +179,7 @@ fn run_app(
                                     &command,
                                     &mut app,
                                     &data,
+                                    &mut dashboards,
                                     terminal,
                                     &mut manager,
                                     &input,
@@ -198,6 +201,7 @@ fn run_app(
                                 "cursor_up",
                                 &mut app,
                                 &data,
+                                &mut dashboards,
                                 terminal,
                                 &mut manager,
                                 &input,
@@ -208,6 +212,7 @@ fn run_app(
                                 "cursor_down",
                                 &mut app,
                                 &data,
+                                &mut dashboards,
                                 terminal,
                                 &mut manager,
                                 &input,
@@ -218,7 +223,9 @@ fn run_app(
                                 continue;
                             }
                             let size = terminal.size()?;
-                            if let Some(panel) = panel_at(size, mouse.column, mouse.row) {
+                            if let Some(panel) =
+                                panel_at(size, mouse.column, mouse.row, dashboards.active_type())
+                            {
                                 app.set_focus(panel);
                             }
                         }
@@ -324,6 +331,7 @@ fn handle_command_input(
     app: &mut AppState,
     input: &mut InputBindings,
     data: &DataStore,
+    dashboards: &mut DashboardStore,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     manager: &mut CollectorManager,
     use_sudo: bool,
@@ -342,6 +350,7 @@ fn handle_command_input(
                 app,
                 input,
                 data,
+                dashboards,
                 terminal,
                 manager,
                 use_sudo,
@@ -375,6 +384,7 @@ fn run_command(
     app: &mut AppState,
     input: &mut InputBindings,
     data: &DataStore,
+    dashboards: &mut DashboardStore,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     manager: &mut CollectorManager,
     use_sudo: bool,
@@ -485,6 +495,42 @@ fn run_command(
             }
             Ok(false)
         }
+        "dashboard_delete" => {
+            let index = if let Some(value) = parts.next() {
+                match parse_dashboard_index(value) {
+                    Ok(index) => index,
+                    Err(error) => {
+                        app.set_error(Some(error));
+                        return Ok(false);
+                    }
+                }
+            } else {
+                dashboards.active_index()
+            };
+            match dashboards.remove(index) {
+                Ok(()) => app.set_message(Some(format!("Removed dashboard {}.", index + 1))),
+                Err(error) => app.set_error(Some(error)),
+            }
+            Ok(false)
+        }
+        "dashboard_goto" => {
+            let Some(value) = parts.next() else {
+                app.set_error(Some("Usage: :dashboard_goto <n>".to_string()));
+                return Ok(false);
+            };
+            let index = match parse_dashboard_index(value) {
+                Ok(index) => index,
+                Err(error) => {
+                    app.set_error(Some(error));
+                    return Ok(false);
+                }
+            };
+            match dashboards.set_active(index) {
+                Ok(()) => {}
+                Err(error) => app.set_error(Some(error)),
+            }
+            Ok(false)
+        }
         "maps" => {
             app.set_notice("Mappings", input.mapping_rows(), false);
             Ok(false)
@@ -494,7 +540,7 @@ fn run_command(
                 app.set_error(Some(format!(":{root} does not take arguments.")));
                 return Ok(false);
             }
-            execute_named_command(root, app, data, terminal, manager, input)
+            execute_named_command(root, app, data, dashboards, terminal, manager, input)
         }
         _ => {
             app.set_error(Some(format!("Unknown command: {root}")));
@@ -507,6 +553,7 @@ fn execute_named_command(
     command: &str,
     app: &mut AppState,
     data: &DataStore,
+    dashboards: &mut DashboardStore,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     manager: &mut CollectorManager,
     input: &InputBindings,
@@ -548,6 +595,29 @@ fn execute_named_command(
             let result = manager.query(query);
             let rows = rows_from_query(&result);
             app.set_notice(&result.title, rows, false);
+            Ok(false)
+        }
+        "dashboards" => {
+            let query = Query {
+                source: QuerySource::Dashboards,
+                selected_index: None,
+                mode: SeriesMode::Latest,
+            };
+            let result = dashboards.query(query);
+            let rows = rows_from_query(&result);
+            app.set_notice(&result.title, rows, false);
+            Ok(false)
+        }
+        "dashboard_new" => {
+            dashboards.add_blank();
+            Ok(false)
+        }
+        "dashboard_next" => {
+            dashboards.next();
+            Ok(false)
+        }
+        "dashboard_prev" => {
+            dashboards.prev();
             Ok(false)
         }
         "maps" => {
@@ -596,6 +666,18 @@ fn build_help_rows() -> Vec<Vec<String>> {
         vec![":q".to_string(), "quit".to_string()],
         vec![":help".to_string(), "show this help".to_string()],
         vec![":collectors".to_string(), "list collectors".to_string()],
+        vec![":dashboards".to_string(), "list dashboards".to_string()],
+        vec![":dashboard_new".to_string(), "create dashboard".to_string()],
+        vec![
+            ":dashboard_delete [n]".to_string(),
+            "remove dashboard".to_string(),
+        ],
+        vec![":dashboard_next".to_string(), "next dashboard".to_string()],
+        vec![":dashboard_prev".to_string(), "previous dashboard".to_string()],
+        vec![
+            ":dashboard_goto <n>".to_string(),
+            "switch dashboard".to_string(),
+        ],
         vec![
             ":collector on <id>".to_string(),
             "enable collector".to_string(),
@@ -767,7 +849,7 @@ fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
             let matches: Vec<&str> = crate::input::COMMANDS
                 .iter()
                 .copied()
-                .filter(|command| !matches!(*command, "map" | "unmap" | "collector" | "reauth"))
+                .filter(|command| InputBindings::is_no_arg_command(command))
                 .collect();
             if let Some(completion) = resolve_completion("", &matches) {
                 let mut new_buffer = buffer.to_string();
@@ -782,7 +864,9 @@ fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
             let matches: Vec<&str> = crate::input::COMMANDS
                 .iter()
                 .copied()
-                .filter(|command| command.starts_with(prefix))
+                .filter(|command| {
+                    command.starts_with(prefix) && InputBindings::is_no_arg_command(command)
+                })
                 .collect();
             if let Some(completion) = resolve_completion(prefix, &matches) {
                 let new_buffer = replace_tail(&buffer, prefix, &completion);
@@ -870,6 +954,16 @@ fn replace_tail(buffer: &str, prefix: &str, completion: &str) -> String {
     let mut new_buffer = buffer.to_string();
     new_buffer.replace_range(cut.., completion);
     new_buffer
+}
+
+fn parse_dashboard_index(value: &str) -> Result<usize, String> {
+    let parsed: usize = value
+        .parse()
+        .map_err(|_| format!("Invalid dashboard index: {value}"))?;
+    if parsed == 0 {
+        return Err("Dashboard index starts at 1.".to_string());
+    }
+    Ok(parsed - 1)
 }
 
 struct CollectorHandle {

@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use crate::collector::SAMPLE_INTERVAL;
-use crate::data::{DataStore, SeriesValue};
+use crate::data::{DashboardStore, DashboardType, DataStore, SeriesValue};
 use crate::query::{Query, QueryProvider, QueryResult, QueryRow, QuerySource, SeriesMode};
 
 const CHART_COLORS: [Color; 6] = [
@@ -405,33 +405,41 @@ pub fn draw_ui(
     frame: &mut Frame,
     data: &DataStore,
     collectors: &dyn QueryProvider,
+    dashboards: &DashboardStore,
     app: &AppState,
 ) {
     let size = frame.size();
     let areas = panel_areas(size);
 
-    draw_metrics_list(
-        frame,
-        data,
-        app,
-        app.focus() == FocusPanel::Metrics,
-        areas.metrics,
-    );
-    draw_chart(
-        frame,
-        data,
-        app,
-        app.focus() == FocusPanel::Chart,
-        areas.chart,
-    );
-    draw_info_panel(frame, data, app, app.focus() == FocusPanel::Info, areas.info);
-    draw_collectors_panel(
-        frame,
-        collectors,
-        app,
-        app.focus() == FocusPanel::Collectors,
-        areas.collectors,
-    );
+    draw_dashboard_bar(frame, dashboards, areas.dashboard);
+
+    match dashboards.active_type() {
+        DashboardType::FixedType => {
+            draw_metrics_list(
+                frame,
+                data,
+                app,
+                app.focus() == FocusPanel::Metrics,
+                areas.metrics,
+            );
+            draw_chart(
+                frame,
+                data,
+                app,
+                app.focus() == FocusPanel::Chart,
+                areas.chart,
+            );
+            draw_info_panel(frame, data, app, app.focus() == FocusPanel::Info, areas.info);
+            draw_collectors_panel(
+                frame,
+                collectors,
+                app,
+                app.focus() == FocusPanel::Collectors,
+                areas.collectors,
+            );
+        }
+        DashboardType::BlankType => draw_blank_dashboard(frame, areas.body),
+    }
 
     if let Some(rows) = app.notice_rows() {
         if let Some(title) = app.notice_title() {
@@ -449,7 +457,51 @@ pub fn draw_ui(
     draw_command_bar(frame, app, areas.command);
 }
 
+fn draw_dashboard_bar(frame: &mut Frame, dashboards: &DashboardStore, area: Rect) {
+    if area.height == 0 {
+        return;
+    }
+
+    let count = dashboards.count();
+    if count == 0 {
+        return;
+    }
+
+    let active = dashboards.active_index();
+    let mut spans = Vec::new();
+    for index in 0..count {
+        let label = format!("{}", index + 1);
+        let style = if index == active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(label, style));
+        if index + 1 < count {
+            spans.push(Span::raw(" "));
+        }
+    }
+
+    let bar = Paragraph::new(Line::from(spans));
+    frame.render_widget(bar, area);
+}
+
+fn draw_blank_dashboard(frame: &mut Frame, area: Rect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let block = Block::default().title("Dashboard").borders(Borders::ALL);
+    let content = Paragraph::new("Blank dashboard").block(block);
+    frame.render_widget(content, area);
+}
+
 pub(crate) struct PanelAreas {
+    pub dashboard: Rect,
+    pub body: Rect,
     pub metrics: Rect,
     pub chart: Rect,
     pub info: Rect,
@@ -460,9 +512,11 @@ pub(crate) struct PanelAreas {
 pub(crate) fn panel_areas(size: Rect) -> PanelAreas {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
         .split(size);
-    let command = chunks[1];
+    let dashboard = chunks[0];
+    let body = chunks[1];
+    let command = chunks[2];
 
     if size.width < 90 {
         let body_chunks = Layout::default()
@@ -473,9 +527,11 @@ pub(crate) fn panel_areas(size: Rect) -> PanelAreas {
                 Constraint::Percentage(20),
                 Constraint::Percentage(20),
             ])
-            .split(chunks[0]);
+            .split(body);
 
         return PanelAreas {
+            dashboard,
+            body,
             metrics: body_chunks[0],
             chart: body_chunks[1],
             info: body_chunks[2],
@@ -487,7 +543,7 @@ pub(crate) fn panel_areas(size: Rect) -> PanelAreas {
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(chunks[0]);
+        .split(body);
 
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -500,6 +556,8 @@ pub(crate) fn panel_areas(size: Rect) -> PanelAreas {
         .split(body_chunks[1]);
 
     PanelAreas {
+        dashboard,
+        body,
         metrics: left_chunks[0],
         collectors: left_chunks[1],
         chart: right_chunks[0],
@@ -508,7 +566,11 @@ pub(crate) fn panel_areas(size: Rect) -> PanelAreas {
     }
 }
 
-pub(crate) fn panel_at(size: Rect, x: u16, y: u16) -> Option<FocusPanel> {
+pub(crate) fn panel_at(size: Rect, x: u16, y: u16, dashboard_type: DashboardType) -> Option<FocusPanel> {
+    if matches!(dashboard_type, DashboardType::BlankType) {
+        return None;
+    }
+
     let areas = panel_areas(size);
     if point_in_rect(areas.metrics, x, y) {
         return Some(FocusPanel::Metrics);

@@ -50,6 +50,31 @@ pub struct DataStore {
     order: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub enum DashboardType {
+    FixedType,
+    BlankType,
+}
+
+impl DashboardType {
+    pub fn label(&self) -> &'static str {
+        match self {
+            DashboardType::FixedType => "Fixed",
+            DashboardType::BlankType => "Blank",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Dashboard {
+    pub kind: DashboardType,
+}
+
+pub struct DashboardStore {
+    dashboards: Vec<Dashboard>,
+    active: usize,
+}
+
 pub struct CollectorRegistration {
     pub id: &'static str,
     pub name: &'static str,
@@ -163,6 +188,12 @@ impl DataStore {
                 rows: Vec::new(),
                 series_column: None,
             },
+            QuerySource::Dashboards => QueryResult {
+                title: "Dashboards".to_string(),
+                columns: Vec::new(),
+                rows: Vec::new(),
+                series_column: None,
+            },
         }
     }
 
@@ -252,5 +283,113 @@ fn series_values(series: &DataSeries, mode: SeriesMode) -> Vec<SeriesValue> {
     match mode {
         SeriesMode::Latest => series.values.back().cloned().into_iter().collect(),
         SeriesMode::Full => series.values.iter().cloned().collect(),
+    }
+}
+
+impl DashboardStore {
+    pub fn new() -> Self {
+        Self {
+            dashboards: vec![Dashboard {
+                kind: DashboardType::FixedType,
+            }],
+            active: 0,
+        }
+    }
+
+    pub fn count(&self) -> usize {
+        self.dashboards.len()
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    pub fn active_type(&self) -> DashboardType {
+        self.dashboards
+            .get(self.active)
+            .map(|dashboard| dashboard.kind.clone())
+            .unwrap_or(DashboardType::FixedType)
+    }
+
+    pub fn add_blank(&mut self) {
+        self.dashboards.push(Dashboard {
+            kind: DashboardType::BlankType,
+        });
+        self.active = self.dashboards.len().saturating_sub(1);
+    }
+
+    pub fn remove(&mut self, index: usize) -> Result<(), String> {
+        if self.dashboards.len() <= 1 {
+            return Err("Cannot remove the last dashboard.".to_string());
+        }
+        if index >= self.dashboards.len() {
+            return Err(format!("Dashboard {} does not exist.", index + 1));
+        }
+
+        self.dashboards.remove(index);
+        if self.active == index {
+            if index >= self.dashboards.len() {
+                self.active = self.dashboards.len().saturating_sub(1);
+            }
+        } else if self.active > index {
+            self.active = self.active.saturating_sub(1);
+        }
+
+        Ok(())
+    }
+
+    pub fn set_active(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.dashboards.len() {
+            return Err(format!("Dashboard {} does not exist.", index + 1));
+        }
+        self.active = index;
+        Ok(())
+    }
+
+    pub fn next(&mut self) {
+        if self.dashboards.is_empty() {
+            return;
+        }
+        self.active = (self.active + 1) % self.dashboards.len();
+    }
+
+    pub fn prev(&mut self) {
+        if self.dashboards.is_empty() {
+            return;
+        }
+        if self.active == 0 {
+            self.active = self.dashboards.len() - 1;
+        } else {
+            self.active -= 1;
+        }
+    }
+
+    pub fn query(&self, _query: Query) -> QueryResult {
+        let rows = self
+            .dashboards
+            .iter()
+            .enumerate()
+            .map(|(index, dashboard)| QueryRow {
+                cells: vec![
+                    vec![SeriesValue::Text((index + 1).to_string())],
+                    vec![SeriesValue::Text(dashboard.kind.label().to_string())],
+                    vec![SeriesValue::Text(if index == self.active {
+                        "active".to_string()
+                    } else {
+                        String::new()
+                    })],
+                ],
+                series_label: None,
+                series_unit: None,
+                sample_count: None,
+            })
+            .collect();
+
+        QueryResult {
+            title: "Dashboards".to_string(),
+            columns: vec!["#".to_string(), "Type".to_string(), "Active".to_string()],
+            rows,
+            series_column: None,
+        }
     }
 }
