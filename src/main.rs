@@ -136,6 +136,14 @@ fn run_app(
                     }
 
                     if app.is_command_mode() {
+                        if key.code == KeyCode::Char('c')
+                            && key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL)
+                        {
+                            app.clear_command_buffer();
+                            continue;
+                        }
                         if handle_command_input(
                             key.code,
                             &mut app,
@@ -599,7 +607,7 @@ fn execute_named_command(
     match command {
         "q" | "quit" => Ok(true),
         "help" => {
-            app.set_notice("Help", build_help_rows(), false);
+            app.set_notice_with_action("Help", build_help_rows(), false, NoticeAction::PrefillCommand);
             Ok(false)
         }
         "collectors" => {
@@ -720,8 +728,17 @@ fn build_help_rows() -> Vec<Vec<String>> {
             "move selection down".to_string(),
         ],
         vec![
-            ":panel_navigate_left/right/up/down".to_string(),
-            "move focus between panels".to_string(),
+            ":panel_navigate_left".to_string(),
+            "move focus left".to_string(),
+        ],
+        vec![
+            ":panel_navigate_right".to_string(),
+            "move focus right".to_string(),
+        ],
+        vec![":panel_navigate_up".to_string(), "move focus up".to_string()],
+        vec![
+            ":panel_navigate_down".to_string(),
+            "move focus down".to_string(),
         ],
     ]
 }
@@ -957,6 +974,15 @@ fn handle_notice_enter(app: &mut AppState, dashboards: &mut DashboardStore) -> b
                 Err(error) => app.set_error(Some(error)),
             }
             true
+        }
+        Some(NoticeAction::PrefillCommand) => {
+            if let Some(command) = app.notice_selected_command() {
+                app.clear_notice();
+                app.enter_command_mode();
+                app.set_command_buffer(command);
+                return true;
+            }
+            false
         }
         None => false,
     }

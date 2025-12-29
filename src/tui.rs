@@ -51,6 +51,7 @@ struct Notice {
 #[derive(Copy, Clone, Debug)]
 pub enum NoticeAction {
     DashboardGoto,
+    PrefillCommand,
 }
 
 struct CompletionState {
@@ -225,6 +226,13 @@ impl AppState {
         self.command_buffer = value;
     }
 
+    pub fn clear_command_buffer(&mut self) {
+        self.command_buffer.clear();
+        self.history_index = None;
+        self.history_draft = None;
+        self.clear_completion();
+    }
+
     pub fn set_command_buffer_from_completion(&mut self, value: String) {
         self.command_buffer = value;
     }
@@ -394,6 +402,25 @@ impl AppState {
 
     pub fn notice_action(&self) -> Option<NoticeAction> {
         self.notice.as_ref().and_then(|notice| notice.on_enter)
+    }
+
+    pub fn notice_selected_command(&self) -> Option<String> {
+        let notice = self.notice.as_ref()?;
+        let row = notice.rows.get(notice.selected)?;
+        let raw = row.get(0)?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let value = raw.trim_start_matches(':').trim();
+        if value.is_empty() {
+            return None;
+        }
+        let command = value.split_whitespace().next().unwrap_or(value);
+        if raw.contains('<') || raw.contains('[') {
+            Some(format!("{command} "))
+        } else {
+            Some(command.to_string())
+        }
     }
 
     pub fn select_notice_next(&mut self) {
