@@ -4,7 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, Borders, Chart, Dataset, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Axis, Block, Borders, Chart, Dataset, List, ListItem, ListState, Paragraph},
 };
 
 use crate::collector::SAMPLE_INTERVAL;
@@ -29,9 +29,13 @@ pub struct AppState {
     error: Option<String>,
     message: Option<String>,
     focus: FocusPanel,
+    info_selected: usize,
+    collectors_selected: usize,
+    collectors_rows: Vec<Vec<String>>,
     command_mode: bool,
     command_buffer: String,
     focus_pending: bool,
+    pending_g: bool,
     command_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: Option<String>,
@@ -42,6 +46,7 @@ pub enum FocusPanel {
     Metrics,
     Chart,
     Info,
+    Collectors,
 }
 
 impl AppState {
@@ -51,9 +56,13 @@ impl AppState {
             error: None,
             message: None,
             focus: FocusPanel::Metrics,
+            info_selected: 0,
+            collectors_selected: 0,
+            collectors_rows: Vec::new(),
             command_mode: false,
             command_buffer: String::new(),
             focus_pending: false,
+            pending_g: false,
             command_history: Vec::new(),
             history_index: None,
             history_draft: None,
@@ -75,6 +84,36 @@ impl AppState {
         self.selected = self.selected.saturating_sub(1);
     }
 
+    pub fn select_info_next(&mut self, data: &DataStore) {
+        let count = data.info_order().len();
+        if count == 0 {
+            return;
+        }
+        self.info_selected = (self.info_selected + 1).min(count - 1);
+    }
+
+    pub fn select_info_prev(&mut self, data: &DataStore) {
+        if data.info_order().is_empty() {
+            return;
+        }
+        self.info_selected = self.info_selected.saturating_sub(1);
+    }
+
+    pub fn select_collectors_next(&mut self) {
+        let count = self.collectors_rows.len();
+        if count == 0 {
+            return;
+        }
+        self.collectors_selected = (self.collectors_selected + 1).min(count - 1);
+    }
+
+    pub fn select_collectors_prev(&mut self) {
+        if self.collectors_rows.is_empty() {
+            return;
+        }
+        self.collectors_selected = self.collectors_selected.saturating_sub(1);
+    }
+
     pub fn clamp_selection(&mut self, data: &DataStore) {
         let count = data.metric_count();
         if count == 0 {
@@ -82,10 +121,50 @@ impl AppState {
         } else if self.selected >= count {
             self.selected = count - 1;
         }
+
+        let info_count = data.info_order().len();
+        if info_count == 0 {
+            self.info_selected = 0;
+        } else if self.info_selected >= info_count {
+            self.info_selected = info_count - 1;
+        }
+
+        let collectors_count = self.collectors_rows.len();
+        if collectors_count == 0 {
+            self.collectors_selected = 0;
+        } else if self.collectors_selected >= collectors_count {
+            self.collectors_selected = collectors_count - 1;
+        }
     }
 
     pub fn selected_key<'a>(&self, data: &'a DataStore) -> Option<&'a str> {
         data.metric_key(self.selected)
+    }
+
+    pub fn info_selected(&self) -> usize {
+        self.info_selected
+    }
+
+    pub fn collectors_selected(&self) -> usize {
+        self.collectors_selected
+    }
+
+    pub fn set_collectors_rows(&mut self, rows: Vec<Vec<String>>) {
+        self.collectors_rows = rows;
+        self.clamp_collectors_selection();
+    }
+
+    pub fn collectors_rows(&self) -> &Vec<Vec<String>> {
+        &self.collectors_rows
+    }
+
+    fn clamp_collectors_selection(&mut self) {
+        let count = self.collectors_rows.len();
+        if count == 0 {
+            self.collectors_selected = 0;
+        } else if self.collectors_selected >= count {
+            self.collectors_selected = count - 1;
+        }
     }
 
     pub fn is_command_mode(&self) -> bool {
@@ -192,6 +271,63 @@ impl AppState {
         self.focus_pending = pending;
     }
 
+    pub fn pending_g(&self) -> bool {
+        self.pending_g
+    }
+
+    pub fn set_pending_g(&mut self, pending: bool) {
+        self.pending_g = pending;
+    }
+
+    pub fn clear_pending_g(&mut self) {
+        self.pending_g = false;
+    }
+
+    pub fn jump_top(&mut self, data: &DataStore) {
+        match self.focus {
+            FocusPanel::Metrics => {
+                if data.metric_count() > 0 {
+                    self.selected = 0;
+                }
+            }
+            FocusPanel::Info => {
+                if !data.info_order().is_empty() {
+                    self.info_selected = 0;
+                }
+            }
+            FocusPanel::Collectors => {
+                if !self.collectors_rows.is_empty() {
+                    self.collectors_selected = 0;
+                }
+            }
+            FocusPanel::Chart => {}
+        }
+    }
+
+    pub fn jump_bottom(&mut self, data: &DataStore) {
+        match self.focus {
+            FocusPanel::Metrics => {
+                let count = data.metric_count();
+                if count > 0 {
+                    self.selected = count - 1;
+                }
+            }
+            FocusPanel::Info => {
+                let count = data.info_order().len();
+                if count > 0 {
+                    self.info_selected = count - 1;
+                }
+            }
+            FocusPanel::Collectors => {
+                let count = self.collectors_rows.len();
+                if count > 0 {
+                    self.collectors_selected = count - 1;
+                }
+            }
+            FocusPanel::Chart => {}
+        }
+    }
+
     pub fn set_error(&mut self, error: Option<String>) {
         self.error = error;
         if self.error.is_some() {
@@ -227,40 +363,24 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
             Constraint::Min(0),
-            Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(size);
-
-    let controls = "Arrows/jk to select | : for commands | Ctrl+w then hjkl/arrow to focus";
-    let header = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("mbp-info", Style::default().fg(Color::Cyan)),
-            Span::raw("  powermetrics --samplers smc"),
-        ]),
-        Line::from(controls),
-    ]);
-    frame.render_widget(header, chunks[0]);
 
     if size.width < 90 {
         let body_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(40),
-                Constraint::Percentage(40),
+                Constraint::Percentage(30),
+                Constraint::Percentage(30),
+                Constraint::Percentage(20),
                 Constraint::Percentage(20),
             ])
-            .split(chunks[1]);
+            .split(chunks[0]);
 
-        draw_metrics_list(
-            frame,
-            data,
-            app,
-            app.focus() == FocusPanel::Metrics,
-            body_chunks[0],
-        );
+        draw_metrics_list(frame, data, app, app.focus() == FocusPanel::Metrics, body_chunks[0]);
         draw_chart(
             frame,
             data,
@@ -268,12 +388,29 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
             app.focus() == FocusPanel::Chart,
             body_chunks[1],
         );
-        draw_info_panel(frame, data, app.focus() == FocusPanel::Info, body_chunks[2]);
+        draw_info_panel(
+            frame,
+            data,
+            app,
+            app.focus() == FocusPanel::Info,
+            body_chunks[2],
+        );
+        draw_collectors_panel(
+            frame,
+            app,
+            app.focus() == FocusPanel::Collectors,
+            body_chunks[3],
+        );
     } else {
         let body_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-            .split(chunks[1]);
+            .split(chunks[0]);
+
+        let left_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(body_chunks[0]);
 
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -285,7 +422,13 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
             data,
             app,
             app.focus() == FocusPanel::Metrics,
-            body_chunks[0],
+            left_chunks[0],
+        );
+        draw_collectors_panel(
+            frame,
+            app,
+            app.focus() == FocusPanel::Collectors,
+            left_chunks[1],
         );
         draw_chart(
             frame,
@@ -297,16 +440,17 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
         draw_info_panel(
             frame,
             data,
+            app,
             app.focus() == FocusPanel::Info,
             right_chunks[1],
         );
     }
 
-    let status = build_status_line(data, app);
-    let footer = Paragraph::new(Line::from(status)).block(Block::default().borders(Borders::TOP));
-    frame.render_widget(footer, chunks[2]);
+    let status = build_status_line(app);
+    let footer = Paragraph::new(Line::from(status));
+    frame.render_widget(footer, chunks[1]);
 
-    draw_command_bar(frame, app, chunks[3]);
+    draw_command_bar(frame, app, chunks[2]);
 }
 
 fn draw_metrics_list(
@@ -316,35 +460,17 @@ fn draw_metrics_list(
     focused: bool,
     area: Rect,
 ) {
-    let entries: Vec<&MetricSeries> = data
+    let entries: Vec<(&str, &MetricSeries)> = data
         .metric_order()
         .iter()
-        .filter_map(|key| data.metrics().get(key))
+        .filter_map(|key| data.metrics().get(key).map(|metric| (key.as_str(), metric)))
         .collect();
 
-    let label_width = entries
+    let value_strings: Vec<String> = entries
         .iter()
-        .map(|metric| metric.label.len())
-        .max()
-        .unwrap_or(0)
-        .min(40);
-
-    let available_rows = area.height.saturating_sub(2) as usize;
-    let total = entries.len();
-    let selected = app.selected.min(total.saturating_sub(1));
-    let start = if available_rows == 0 || selected < available_rows {
-        0
-    } else {
-        selected + 1 - available_rows
-    };
-    let end = (start + available_rows).min(total);
-
-    let items: Vec<ListItem> = entries[start..end]
-        .iter()
-        .map(|metric| {
-            let label = format!("{:<width$}", metric.label, width = label_width);
+        .map(|(_, metric)| {
             let latest = metric.values.back().copied();
-            let value = latest
+            latest
                 .map(|value| {
                     if metric.unit.is_empty() {
                         format_value(value)
@@ -352,32 +478,43 @@ fn draw_metrics_list(
                         format!("{} {}", format_value(value), metric.unit)
                     }
                 })
-                .unwrap_or_else(|| "-".to_string());
-            let line = format!("{label} {value}");
-            ListItem::new(Line::from(line))
+                .unwrap_or_else(|| "-".to_string())
         })
         .collect();
 
-    let mut state = ListState::default();
-    if total > 0 {
-        state.select(Some(selected.saturating_sub(start)));
-    }
+    let sample_strings: Vec<String> = entries
+        .iter()
+        .map(|(key, _)| sample_label(data.metric_sample_count(key)))
+        .collect();
 
-    let mut block = Block::default().title("Metrics").borders(Borders::ALL);
-    if focused {
-        block = block.border_style(Style::default().fg(Color::Cyan));
-    }
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
+    let rows: Vec<Vec<String>> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, (_, metric))| {
+            let samples = if focused && index == app.selected {
+                sample_strings[index].clone()
+            } else {
+                String::new()
+            };
+            vec![
+                metric.label.clone(),
+                value_strings[index].clone(),
+                samples,
+            ]
+        })
+        .collect();
 
-    frame.render_stateful_widget(list, area, &mut state);
+    let selected = app.selected.min(rows.len().saturating_sub(1));
+    draw_table(
+        frame,
+        rows,
+        area,
+        focused,
+        selected,
+        "Metrics",
+        "No metrics yet.",
+        true,
+    );
 }
 
 fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool, area: Rect) {
@@ -484,29 +621,127 @@ fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool
     frame.render_widget(chart, area);
 }
 
-fn draw_info_panel(frame: &mut Frame, data: &DataStore, focused: bool, area: Rect) {
-    let max_lines = area.height.saturating_sub(2) as usize;
-    let mut lines = Vec::new();
+fn draw_info_panel(
+    frame: &mut Frame,
+    data: &DataStore,
+    app: &AppState,
+    focused: bool,
+    area: Rect,
+) {
+    let rows: Vec<Vec<String>> = data
+        .info_order()
+        .iter()
+        .filter_map(|label| {
+            data.info()
+                .get(label)
+                .map(|value| vec![label.clone(), value.clone()])
+        })
+        .collect();
 
-    for label in data.info_order() {
-        if let Some(value) = data.info().get(label) {
-            lines.push(Line::from(format!("{label}: {value}")));
-            if lines.len() >= max_lines {
-                break;
-            }
+    let selected = app.info_selected().min(rows.len().saturating_sub(1));
+    draw_table(
+        frame,
+        rows,
+        area,
+        focused,
+        selected,
+        "Static Info",
+        "No static info yet.",
+        false,
+    );
+}
+
+fn draw_collectors_panel(frame: &mut Frame, app: &AppState, focused: bool, area: Rect) {
+    let rows = app.collectors_rows().clone();
+    let selected = app.collectors_selected().min(rows.len().saturating_sub(1));
+    draw_table(
+        frame,
+        rows,
+        area,
+        focused,
+        selected,
+        "Collectors",
+        "No collectors registered.",
+        true,
+    );
+}
+
+fn draw_table(
+    frame: &mut Frame,
+    mut rows: Vec<Vec<String>>,
+    area: Rect,
+    focused: bool,
+    selected: usize,
+    title: &str,
+    empty_text: &str,
+    right_align_last: bool,
+) {
+    if rows.is_empty() {
+        rows.push(vec![empty_text.to_string()]);
+    }
+
+    let columns = rows.iter().map(|row| row.len()).max().unwrap_or(1);
+    let right_align = right_align_last && columns > 1;
+    let mut widths = vec![1usize; columns];
+    for row in &rows {
+        for (index, col) in row.iter().enumerate() {
+            widths[index] = widths[index].max(col.len().max(1));
         }
     }
-
-    if lines.is_empty() {
-        lines.push(Line::from("No static info yet."));
+    if let Some(first_width) = widths.get_mut(0) {
+        *first_width = (*first_width).min(40);
     }
 
-    let mut block = Block::default().title("Static Info").borders(Borders::ALL);
+    let available_rows = area.height.saturating_sub(2) as usize;
+    let total = rows.len();
+    let selected = selected.min(total.saturating_sub(1));
+    let start = if available_rows == 0 || selected < available_rows {
+        0
+    } else {
+        selected + 1 - available_rows
+    };
+    let end = (start + available_rows).min(total);
+
+    let items: Vec<ListItem> = rows
+        .iter()
+        .skip(start)
+        .take(end - start)
+        .map(|row| {
+            let mut parts = Vec::with_capacity(columns);
+            for index in 0..columns {
+                let value = row.get(index).map(String::as_str).unwrap_or("");
+                let width = widths.get(index).copied().unwrap_or(1);
+                let formatted = if right_align && index + 1 == columns {
+                    format!("{value:>width$}")
+                } else {
+                    format!("{value:<width$}")
+                };
+                parts.push(formatted);
+            }
+            ListItem::new(Line::from(parts.join(" ")))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    if total > 0 {
+        state.select(Some(selected.saturating_sub(start)));
+    }
+
+    let mut block = Block::default().title(title).borders(Borders::ALL);
     if focused {
         block = block.border_style(Style::default().fg(Color::Cyan));
     }
-    let panel = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
-    frame.render_widget(panel, area);
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_command_bar(frame: &mut Frame, app: &AppState, area: Rect) {
@@ -519,7 +754,7 @@ fn draw_command_bar(frame: &mut Frame, app: &AppState, area: Rect) {
     frame.render_widget(command, area);
 }
 
-fn build_status_line(data: &DataStore, app: &AppState) -> String {
+fn build_status_line(app: &AppState) -> String {
     if let Some(error) = app.error() {
         return format!("Error: {error}");
     }
@@ -528,26 +763,7 @@ fn build_status_line(data: &DataStore, app: &AppState) -> String {
         return message.to_string();
     }
 
-    if data.sample_count() == 0 {
-        return "Waiting for samples...".to_string();
-    }
-
-    let age = data
-        .last_sample()
-        .map(|instant| instant.elapsed().as_secs())
-        .unwrap_or(0);
-    let focus = match app.focus() {
-        FocusPanel::Metrics => "Metrics",
-        FocusPanel::Chart => "Chart",
-        FocusPanel::Info => "Info",
-    };
-    format!(
-        "Samples: {} | Interval: {}s | Last update: {}s ago | Focus: {}",
-        data.sample_count(),
-        SAMPLE_INTERVAL.as_secs(),
-        age,
-        focus
-    )
+    String::new()
 }
 
 fn format_value(value: f64) -> String {
@@ -556,6 +772,14 @@ fn format_value(value: f64) -> String {
         .trim_end_matches('0')
         .trim_end_matches('.')
         .to_string()
+}
+
+fn sample_label(count: u64) -> String {
+    if count == 1 {
+        "1 sample".to_string()
+    } else {
+        format!("{count} samples")
+    }
 }
 
 fn label_matches(label: &str, other: &str) -> bool {

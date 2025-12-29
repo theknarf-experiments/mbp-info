@@ -37,6 +37,7 @@ pub trait Collector: Send {
 
 pub enum CollectorMessage {
     Sample {
+        collector: &'static str,
         data: SampleData,
     },
     Error {
@@ -57,7 +58,7 @@ pub fn spawn_collector(
             if stop.load(Ordering::Relaxed) {
                 match collector.sample() {
                     Ok(data) => {
-                        let _ = tx.send(CollectorMessage::Sample { data });
+                        let _ = tx.send(CollectorMessage::Sample { collector: id, data });
                     }
                     Err(error) => {
                         let _ = tx.send(CollectorMessage::Error {
@@ -77,7 +78,7 @@ pub fn spawn_collector(
 
             match collector.sample() {
                 Ok(data) => {
-                    let _ = tx.send(CollectorMessage::Sample { data });
+                    let _ = tx.send(CollectorMessage::Sample { collector: id, data });
                 }
                 Err(error) => {
                     let _ = tx.send(CollectorMessage::Error {

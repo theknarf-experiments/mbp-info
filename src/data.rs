@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
 
 pub const MAX_SAMPLES: usize = 120;
 
@@ -33,10 +32,9 @@ pub struct SampleData {
 pub struct DataStore {
     metrics: HashMap<String, MetricSeries>,
     order: Vec<String>,
+    metric_samples: HashMap<String, u64>,
     info: HashMap<String, String>,
     info_order: Vec<String>,
-    sample_count: u64,
-    last_sample: Option<Instant>,
 }
 
 impl DataStore {
@@ -44,16 +42,13 @@ impl DataStore {
         Self {
             metrics: HashMap::new(),
             order: Vec::new(),
+            metric_samples: HashMap::new(),
             info: HashMap::new(),
             info_order: Vec::new(),
-            sample_count: 0,
-            last_sample: None,
         }
     }
 
     pub fn apply_sample(&mut self, data: SampleData) {
-        let has_data = !data.metrics.is_empty() || !data.info.is_empty();
-
         for metric in data.metrics {
             let entry = self
                 .metrics
@@ -68,6 +63,9 @@ impl DataStore {
                 entry.values.pop_front();
             }
 
+            let count = self.metric_samples.entry(metric.key.clone()).or_insert(0);
+            *count += 1;
+
             if !self.order.contains(&metric.key) {
                 self.order.push(metric.key);
             }
@@ -79,11 +77,6 @@ impl DataStore {
             if is_new {
                 self.info_order.push(entry.label);
             }
-        }
-
-        if has_data {
-            self.sample_count += 1;
-            self.last_sample = Some(Instant::now());
         }
     }
 
@@ -111,11 +104,7 @@ impl DataStore {
         &self.info_order
     }
 
-    pub fn sample_count(&self) -> u64 {
-        self.sample_count
-    }
-
-    pub fn last_sample(&self) -> Option<Instant> {
-        self.last_sample
+    pub fn metric_sample_count(&self, key: &str) -> u64 {
+        self.metric_samples.get(key).copied().unwrap_or(0)
     }
 }

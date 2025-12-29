@@ -11,7 +11,7 @@ use std::sync::{
     Arc,
 };
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -106,7 +106,11 @@ fn run_app(
     loop {
         while let Ok(message) = rx.try_recv() {
             match message {
-                CollectorMessage::Sample { data: sample } => {
+                CollectorMessage::Sample {
+                    collector,
+                    data: sample,
+                } => {
+                    manager.record_sample(collector);
                     data.apply_sample(sample);
                     app.clamp_selection(&data);
                     app.set_error(None);
@@ -117,6 +121,7 @@ fn run_app(
             }
         }
 
+        app.set_collectors_rows(manager.collector_rows());
         terminal.draw(|frame| draw_ui(frame, &data, &app))?;
 
         if event::poll(tick_rate)? {
@@ -146,6 +151,10 @@ fn run_app(
                     }
                 }
 
+                if app.pending_g() && !matches!(key.code, KeyCode::Char('g')) {
+                    app.clear_pending_g();
+                }
+
                 match key.code {
                     KeyCode::Char(':') => app.enter_command_mode(),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -153,17 +162,32 @@ fn run_app(
                     }
                     KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.set_focus_pending(true);
+                        app.clear_pending_g();
                     }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if app.focus() == FocusPanel::Metrics {
-                            app.select_prev(&data);
+                    KeyCode::Char('g') => {
+                        if app.pending_g() {
+                            app.jump_top(&data);
+                            app.clear_pending_g();
+                        } else {
+                            app.set_pending_g(true);
                         }
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if app.focus() == FocusPanel::Metrics {
-                            app.select_next(&data);
-                        }
+                    KeyCode::Char('G') => {
+                        app.clear_pending_g();
+                        app.jump_bottom(&data);
                     }
+                    KeyCode::Up | KeyCode::Char('k') => match app.focus() {
+                        FocusPanel::Metrics => app.select_prev(&data),
+                        FocusPanel::Info => app.select_info_prev(&data),
+                        FocusPanel::Collectors => app.select_collectors_prev(),
+                        FocusPanel::Chart => {}
+                    },
+                    KeyCode::Down | KeyCode::Char('j') => match app.focus() {
+                        FocusPanel::Metrics => app.select_next(&data),
+                        FocusPanel::Info => app.select_info_next(&data),
+                        FocusPanel::Collectors => app.select_collectors_next(),
+                        FocusPanel::Chart => {}
+                    },
                     _ => {}
                 }
             }
@@ -557,13 +581,21 @@ fn handle_focus_move(
     match code {
         KeyCode::Left | KeyCode::Char('h') => {
             if is_wide {
-                app.set_focus(FocusPanel::Metrics);
+                match app.focus() {
+                    FocusPanel::Chart => app.set_focus(FocusPanel::Metrics),
+                    FocusPanel::Info => app.set_focus(FocusPanel::Collectors),
+                    _ => {}
+                }
                 return Ok(true);
             }
         }
         KeyCode::Right | KeyCode::Char('l') => {
             if is_wide {
-                app.set_focus(FocusPanel::Chart);
+                match app.focus() {
+                    FocusPanel::Metrics => app.set_focus(FocusPanel::Chart),
+                    FocusPanel::Collectors => app.set_focus(FocusPanel::Info),
+                    _ => {}
+                }
                 return Ok(true);
             }
         }
@@ -587,12 +619,19 @@ fn handle_focus_move(
 fn move_focus_vertical(app: &mut AppState, is_wide: bool, up: bool) {
     if is_wide {
         match (app.focus(), up) {
+            (FocusPanel::Collectors, true) => app.set_focus(FocusPanel::Metrics),
+            (FocusPanel::Metrics, false) => app.set_focus(FocusPanel::Collectors),
             (FocusPanel::Info, true) => app.set_focus(FocusPanel::Chart),
             (FocusPanel::Chart, false) => app.set_focus(FocusPanel::Info),
             _ => {}
         }
     } else {
-        let order = [FocusPanel::Metrics, FocusPanel::Chart, FocusPanel::Info];
+        let order = [
+            FocusPanel::Metrics,
+            FocusPanel::Chart,
+            FocusPanel::Info,
+            FocusPanel::Collectors,
+        ];
         let current = order
             .iter()
             .position(|item| *item == app.focus())
@@ -610,6 +649,7 @@ struct CollectorRegistration {
     id: &'static str,
     name: &'static str,
     requires_sudo: bool,
+    interval: Duration,
     factory: Box<dyn Fn() -> Box<dyn Collector> + Send + Sync>,
 }
 
@@ -620,6 +660,7 @@ impl CollectorRegistration {
             id: collector.id(),
             name: collector.name(),
             requires_sudo: collector.requires_sudo(),
+            interval: collector.interval(),
             factory,
         }
     }
@@ -633,6 +674,7 @@ struct CollectorHandle {
 struct CollectorManager {
     registrations: Vec<CollectorRegistration>,
     running: HashMap<&'static str, CollectorHandle>,
+    last_sample: HashMap<&'static str, Instant>,
     tx: Sender<CollectorMessage>,
 }
 
@@ -641,6 +683,7 @@ impl CollectorManager {
         Self {
             registrations,
             running: HashMap::new(),
+            last_sample: HashMap::new(),
             tx,
         }
     }
@@ -653,6 +696,38 @@ impl CollectorManager {
         self.registrations.iter().map(|reg| reg.id).collect()
     }
 
+    fn collector_rows(&self) -> Vec<Vec<String>> {
+        let now = Instant::now();
+        self.registrations
+            .iter()
+            .map(|reg| {
+                let status = if self.running.contains_key(reg.id) {
+                    "on"
+                } else {
+                    "off"
+                };
+                let status = if reg.requires_sudo {
+                    format!("{status} (sudo)")
+                } else {
+                    status.to_string()
+                };
+                let interval = format!("{}s", reg.interval.as_secs());
+                let last_update = self
+                    .last_sample
+                    .get(reg.id)
+                    .map(|instant| format!("{}s ago", now.duration_since(*instant).as_secs()))
+                    .unwrap_or_else(|| "-".to_string());
+                vec![
+                    reg.name.to_string(),
+                    reg.id.to_string(),
+                    status,
+                    interval,
+                    last_update,
+                ]
+            })
+            .collect()
+    }
+
     fn requires_sudo(&self, id: &str) -> Option<bool> {
         self.registrations
             .iter()
@@ -662,6 +737,10 @@ impl CollectorManager {
 
     fn is_enabled(&self, id: &str) -> bool {
         self.running.contains_key(id)
+    }
+
+    fn record_sample(&mut self, id: &'static str) {
+        self.last_sample.insert(id, Instant::now());
     }
 
     fn enable(&mut self, id: &str) -> Result<(), String> {
