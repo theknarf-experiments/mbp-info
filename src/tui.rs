@@ -2,11 +2,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     prelude::Frame,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{
-        Axis, Block, Borders, Chart, Dataset, List, ListItem, ListState, Paragraph, Wrap,
-    },
     symbols,
+    text::{Line, Span},
+    widgets::{Axis, Block, Borders, Chart, Dataset, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 use crate::collector::SAMPLE_INTERVAL;
@@ -21,9 +19,10 @@ const CHART_COLORS: [Color; 6] = [
     Color::LightRed,
 ];
 
-static GROUP_RULES: &[(&str, &[&str])] = &[
-    ("Die temperature", &["CPU die temperature", "GPU die temperature"]),
-];
+static GROUP_RULES: &[(&str, &[&str])] = &[(
+    "Die temperature",
+    &["CPU die temperature", "GPU die temperature"],
+)];
 
 pub struct AppState {
     selected: usize,
@@ -221,7 +220,6 @@ impl AppState {
             self.history_draft = None;
         }
     }
-
 }
 
 pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
@@ -270,12 +268,7 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
             app.focus() == FocusPanel::Chart,
             body_chunks[1],
         );
-        draw_info_panel(
-            frame,
-            data,
-            app.focus() == FocusPanel::Info,
-            body_chunks[2],
-        );
+        draw_info_panel(frame, data, app.focus() == FocusPanel::Info, body_chunks[2]);
     } else {
         let body_chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -310,8 +303,7 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
     }
 
     let status = build_status_line(data, app);
-    let footer =
-        Paragraph::new(Line::from(status)).block(Block::default().borders(Borders::TOP));
+    let footer = Paragraph::new(Line::from(status)).block(Block::default().borders(Borders::TOP));
     frame.render_widget(footer, chunks[2]);
 
     draw_command_bar(frame, app, chunks[3]);
@@ -388,13 +380,7 @@ fn draw_metrics_list(
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_chart(
-    frame: &mut Frame,
-    data: &DataStore,
-    app: &AppState,
-    focused: bool,
-    area: Rect,
-) {
+fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool, area: Rect) {
     let Some(selected_key) = app.selected_key(data) else {
         let mut block = Block::default().title("Chart").borders(Borders::ALL);
         if focused {
@@ -519,9 +505,7 @@ fn draw_info_panel(frame: &mut Frame, data: &DataStore, focused: bool, area: Rec
     if focused {
         block = block.border_style(Style::default().fg(Color::Cyan));
     }
-    let panel = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: true });
+    let panel = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
     frame.render_widget(panel, area);
 }
 
@@ -568,7 +552,10 @@ fn build_status_line(data: &DataStore, app: &AppState) -> String {
 
 fn format_value(value: f64) -> String {
     let fixed = format!("{value:.2}");
-    fixed.trim_end_matches('0').trim_end_matches('.').to_string()
+    fixed
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
 }
 
 fn label_matches(label: &str, other: &str) -> bool {
@@ -593,9 +580,11 @@ fn group_series_for_selected<'a>(
     if let Some((group_name, labels)) = group_rule_for_label(&selected.label) {
         let mut series = Vec::new();
         for label in labels {
-            if let Some(found) = data.metrics().values().find(|metric| {
-                label_matches(&metric.label, label) && metric.unit == selected.unit
-            }) {
+            if let Some(found) = data
+                .metrics()
+                .values()
+                .find(|metric| label_matches(&metric.label, label) && metric.unit == selected.unit)
+            {
                 series.push(found);
             }
         }

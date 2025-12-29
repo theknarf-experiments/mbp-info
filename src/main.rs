@@ -21,9 +21,9 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::collector::{
-    needs_sudo, spawn_collector, Collector, CollectorMessage, CpuInfoCollector,
-    CpuUsageCollector, GpuInfoCollector, MemoryInfoCollector, MemoryUsageCollector,
-    OsVersionCollector, PowermetricsCollector, SwapUsageCollector, UptimeCollector,
+    needs_sudo, spawn_collector, Collector, CollectorMessage, CpuInfoCollector, CpuUsageCollector,
+    GpuInfoCollector, MemoryInfoCollector, MemoryUsageCollector, OsVersionCollector,
+    PowermetricsCollector, SwapUsageCollector, UptimeCollector,
 };
 use crate::data::DataStore;
 use crate::tui::{draw_ui, AppState, FocusPanel};
@@ -67,7 +67,14 @@ fn main() -> io::Result<()> {
         }
     }
 
-    let result = run_app(&mut terminal, rx, manager, use_sudo, sudo_ready, startup_message);
+    let result = run_app(
+        &mut terminal,
+        rx,
+        manager,
+        use_sudo,
+        sudo_ready,
+        startup_message,
+    );
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -448,7 +455,13 @@ fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
         }
 
         if tokens.len() >= 2 {
-            complete_collector_argument(app, &buffer, tokens.as_slice(), trailing_space, collectors);
+            complete_collector_argument(
+                app,
+                &buffer,
+                tokens.as_slice(),
+                trailing_space,
+                collectors,
+            );
         }
     }
 }
@@ -700,10 +713,7 @@ impl CollectorManager {
                 "off"
             };
             let sudo = if reg.requires_sudo { " sudo" } else { "" };
-            entries.push(format!(
-                "{} - {} ({status}{sudo})",
-                reg.id, reg.name
-            ));
+            entries.push(format!("{} - {} ({status}{sudo})", reg.id, reg.name));
         }
         format!("Collectors: {}", entries.join(", "))
     }
