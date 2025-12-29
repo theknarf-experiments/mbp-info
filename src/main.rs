@@ -1,6 +1,7 @@
 mod collector;
 mod data;
 mod input;
+mod query;
 mod tui;
 
 use std::collections::HashMap;
@@ -26,10 +27,9 @@ use crate::collector::{
     GpuInfoCollector, MemoryInfoCollector, MemoryUsageCollector, OsVersionCollector,
     PowermetricsCollector, SwapUsageCollector, UptimeCollector,
 };
-use crate::data::{
-    CollectorRegistration, DataStore, Query, QueryProvider, QueryResult, QuerySource, TableResult,
-};
+use crate::data::{CollectorRegistration, DataStore};
 use crate::input::InputBindings;
+use crate::query::{Query, QueryKind, QueryProvider, QueryResult, QuerySource, TableResult};
 use crate::tui::{draw_ui, AppState, FocusPanel};
 
 const COLLECTOR_ACTIONS: [&str; 2] = ["on", "off"];
@@ -965,10 +965,10 @@ impl CollectorManager {
 impl QueryProvider for CollectorManager {
     fn query(&self, query: Query) -> QueryResult {
         match (query.kind, query.source) {
-            (crate::data::QueryKind::Table, QuerySource::Collectors) => {
+            (QueryKind::Table, QuerySource::Collectors) => {
                 QueryResult::Table(self.collectors_table())
             }
-            _ => QueryResult::Series(crate::data::SeriesResult {
+            _ => QueryResult::Series(crate::query::SeriesResult {
                 title: "Unsupported".to_string(),
                 series: Vec::new(),
             }),

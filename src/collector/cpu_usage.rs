@@ -1,6 +1,6 @@
-use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue, MAX_SAMPLES};
+use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
-use super::Collector;
+use super::{Collector, MAX_SAMPLES};
 
 pub struct CpuUsageCollector {
     last_ticks: Option<Vec<[u64; 4]>>,

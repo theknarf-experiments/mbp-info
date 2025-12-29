@@ -8,7 +8,8 @@ use ratatui::{
 };
 
 use crate::collector::SAMPLE_INTERVAL;
-use crate::data::{DataStore, Query, QueryProvider, QueryResult, SeriesResult, TableResult};
+use crate::data::DataStore;
+use crate::query::{Query, QueryProvider, QueryResult, SeriesResult, TableResult};
 
 const CHART_COLORS: [Color; 6] = [
     Color::Cyan,
@@ -18,6 +19,11 @@ const CHART_COLORS: [Color; 6] = [
     Color::LightBlue,
     Color::LightRed,
 ];
+
+static GROUP_RULES: &[(&str, &[&str])] = &[(
+    "Die temperature",
+    &["CPU die temperature", "GPU die temperature"],
+)];
 
 pub struct AppState {
     selected: usize,
@@ -536,6 +542,7 @@ fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool
             series: Vec::new(),
         },
     };
+    let series_result = apply_chart_grouping(data, series_result);
 
     if series_result.series.is_empty()
         || series_result
@@ -858,6 +865,58 @@ fn draw_notice_popup(
     )
     .with_border_style(border_style);
     draw_tui_table(frame, &table, popup_area);
+}
+
+fn apply_chart_grouping(data: &DataStore, base: SeriesResult) -> SeriesResult {
+    let Some(selected) = base.series.first() else {
+        return base;
+    };
+
+    let Some((group_name, labels)) = group_rule_for_label(&selected.label) else {
+        return base;
+    };
+
+    let all_series = match data.query(Query::metrics_series_all()) {
+        QueryResult::Series(result) => result,
+        _ => return base,
+    };
+
+    let mut grouped = Vec::new();
+    for label in labels {
+        if let Some(found) = all_series
+            .series
+            .iter()
+            .find(|series| label_matches(&series.label, label) && series.unit == selected.unit)
+        {
+            grouped.push(found.clone());
+        }
+    }
+
+    if grouped.is_empty() {
+        return base;
+    }
+
+    let title = if selected.unit.is_empty() {
+        group_name.to_string()
+    } else {
+        format!("{group_name} ({})", selected.unit)
+    };
+
+    SeriesResult {
+        title,
+        series: grouped,
+    }
+}
+
+fn label_matches(label: &str, other: &str) -> bool {
+    label.eq_ignore_ascii_case(other)
+}
+
+fn group_rule_for_label(label: &str) -> Option<(&'static str, &'static [&'static str])> {
+    GROUP_RULES
+        .iter()
+        .find(|(_, labels)| labels.iter().any(|entry| label_matches(label, entry)))
+        .map(|(name, labels)| (*name, *labels))
 }
 
 fn rows_from_text(text: &str) -> Vec<Vec<String>> {

@@ -12,9 +12,10 @@ use libc::c_void;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue, MAX_SAMPLES};
+use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+pub const MAX_SAMPLES: usize = 120;
 
 static NUMERIC_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^\s*(-?\d+(?:\.\d+)?)(?:\s*([A-Za-z/%]+))?\s*$").expect("valid regex")
