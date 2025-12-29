@@ -24,10 +24,12 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
+use crate::collector::{needs_sudo, spawn_collector, CollectorMessage};
+#[cfg(target_os = "macos")]
 use crate::collector::{
-    needs_sudo, spawn_collector, CollectorMessage, CpuInfoCollector, CpuUsageCollector,
-    GpuInfoCollector, MemoryInfoCollector, MemoryUsageCollector, OsVersionCollector,
-    PowermetricsCollector, SwapUsageCollector, UptimeCollector,
+    CpuInfoCollector, CpuUsageCollector, GpuInfoCollector, MemoryInfoCollector,
+    MemoryUsageCollector, OsVersionCollector, PowermetricsCollector, SwapUsageCollector,
+    UptimeCollector,
 };
 use crate::data::{CollectorRegistration, DashboardStore, DataStore, SeriesValue};
 use crate::input::InputBindings;
@@ -293,6 +295,7 @@ fn start_default_collectors(
     message
 }
 
+#[cfg(target_os = "macos")]
 fn register_collectors(use_sudo: bool) -> Vec<CollectorRegistration> {
     vec![
         CollectorRegistration::new(Box::new(move || {
@@ -307,6 +310,11 @@ fn register_collectors(use_sudo: bool) -> Vec<CollectorRegistration> {
         CollectorRegistration::new(Box::new(|| Box::new(GpuInfoCollector::new()))),
         CollectorRegistration::new(Box::new(|| Box::new(OsVersionCollector::new()))),
     ]
+}
+
+#[cfg(not(target_os = "macos"))]
+fn register_collectors(_use_sudo: bool) -> Vec<CollectorRegistration> {
+    vec![]
 }
 
 fn prompt_for_sudo(message: &str) -> io::Result<bool> {

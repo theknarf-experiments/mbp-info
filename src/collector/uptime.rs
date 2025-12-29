@@ -2,7 +2,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
-use super::{sysctl_timeval, Collector, MAX_SAMPLES};
+use super::macos::sysctl_timeval;
+use super::{Collector, MAX_SAMPLES};
 
 pub struct UptimeCollector;
 

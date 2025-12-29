@@ -1,4 +1,3 @@
-use std::ffi::CString;
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -8,7 +7,6 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use libc::c_void;
 use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
@@ -228,100 +226,46 @@ pub(crate) fn run_command(command: &str, args: &[&str]) -> Result<String, String
     Ok(stdout.trim().to_string())
 }
 
-pub(crate) fn sysctl_string(name: &str) -> Result<String, String> {
-    let cname = CString::new(name).map_err(|_| format!("invalid sysctl name: {name}"))?;
-    let mut size: libc::size_t = 0;
-    let rc = unsafe {
-        libc::sysctlbyname(
-            cname.as_ptr(),
-            std::ptr::null_mut(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 {
-        return Err(format!("sysctl {name} failed"));
-    }
-
-    let mut buf = vec![0u8; size as usize];
-    let rc = unsafe {
-        libc::sysctlbyname(
-            cname.as_ptr(),
-            buf.as_mut_ptr() as *mut c_void,
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 {
-        return Err(format!("sysctl {name} failed"));
-    }
-
-    let value = String::from_utf8_lossy(&buf[..size as usize]);
-    Ok(value.trim_end_matches('\0').trim().to_string())
-}
-
-pub(crate) fn sysctl_u64(name: &str) -> Result<u64, String> {
-    let cname = CString::new(name).map_err(|_| format!("invalid sysctl name: {name}"))?;
-    let mut value: u64 = 0;
-    let mut size = std::mem::size_of::<u64>();
-    let rc = unsafe {
-        libc::sysctlbyname(
-            cname.as_ptr(),
-            &mut value as *mut _ as *mut c_void,
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 {
-        return Err(format!("sysctl {name} failed"));
-    }
-
-    Ok(value)
-}
-
-pub(crate) fn sysctl_timeval(name: &str) -> Result<libc::timeval, String> {
-    let cname = CString::new(name).map_err(|_| format!("invalid sysctl name: {name}"))?;
-    let mut value: libc::timeval = unsafe { std::mem::zeroed() };
-    let mut size = std::mem::size_of::<libc::timeval>();
-    let rc = unsafe {
-        libc::sysctlbyname(
-            cname.as_ptr(),
-            &mut value as *mut _ as *mut c_void,
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 {
-        return Err(format!("sysctl {name} failed"));
-    }
-
-    Ok(value)
-}
-
 pub(crate) fn bytes_to_mb(value: u64) -> f64 {
     value as f64 / (1024.0 * 1024.0)
 }
 
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
 mod cpu_info;
+#[cfg(target_os = "macos")]
 mod cpu_usage;
+#[cfg(target_os = "macos")]
 mod gpu_info;
+#[cfg(target_os = "macos")]
 mod memory_info;
+#[cfg(target_os = "macos")]
 mod memory_usage;
+#[cfg(target_os = "macos")]
 mod os_version;
+#[cfg(target_os = "macos")]
 mod powermetrics;
+#[cfg(target_os = "macos")]
 mod swap_usage;
+#[cfg(target_os = "macos")]
 mod uptime;
 
+#[cfg(target_os = "macos")]
 pub use cpu_info::CpuInfoCollector;
+#[cfg(target_os = "macos")]
 pub use cpu_usage::CpuUsageCollector;
+#[cfg(target_os = "macos")]
 pub use gpu_info::GpuInfoCollector;
+#[cfg(target_os = "macos")]
 pub use memory_info::MemoryInfoCollector;
+#[cfg(target_os = "macos")]
 pub use memory_usage::MemoryUsageCollector;
+#[cfg(target_os = "macos")]
 pub use os_version::OsVersionCollector;
+#[cfg(target_os = "macos")]
 pub use powermetrics::PowermetricsCollector;
+#[cfg(target_os = "macos")]
 pub use swap_usage::SwapUsageCollector;
+#[cfg(target_os = "macos")]
 pub use uptime::UptimeCollector;
