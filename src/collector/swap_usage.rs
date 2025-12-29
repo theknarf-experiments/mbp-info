@@ -1,6 +1,6 @@
 use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
-use super::{bytes_to_mb, Collector, MAX_SAMPLES};
+use super::{run_command, Collector, MAX_SAMPLES};
 
 pub struct SwapUsageCollector;
 
@@ -28,21 +28,21 @@ impl Collector for SwapUsageCollector {
                 label: "Swap Used".to_string(),
                 unit: "MB".to_string(),
                 retention: Retention::Rolling(MAX_SAMPLES),
-                value: SeriesValue::Number(bytes_to_mb(usage.xsu_used)),
+                value: SeriesValue::Number(usage.used_mb),
             },
             ParsedDatum {
                 key: "Swap Free|MB".to_string(),
                 label: "Swap Free".to_string(),
                 unit: "MB".to_string(),
                 retention: Retention::Rolling(MAX_SAMPLES),
-                value: SeriesValue::Number(bytes_to_mb(usage.xsu_avail)),
+                value: SeriesValue::Number(usage.free_mb),
             },
             ParsedDatum {
                 key: "Swap Total|MB".to_string(),
                 label: "Swap Total".to_string(),
                 unit: "MB".to_string(),
                 retention: Retention::Rolling(MAX_SAMPLES),
-                value: SeriesValue::Number(bytes_to_mb(usage.xsu_total)),
+                value: SeriesValue::Number(usage.total_mb),
             },
         ];
 
@@ -50,26 +50,80 @@ impl Collector for SwapUsageCollector {
     }
 }
 
-fn read_swap_usage() -> Result<libc::xsw_usage, String> {
-    use libc::c_void;
-    use std::ffi::CString;
+struct SwapUsage {
+    total_mb: f64,
+    used_mb: f64,
+    free_mb: f64,
+}
 
-    let mut usage: libc::xsw_usage = unsafe { std::mem::zeroed() };
-    let mut size = std::mem::size_of::<libc::xsw_usage>();
-    let cname = CString::new("vm.swapusage").map_err(|_| "invalid sysctl name".to_string())?;
+fn read_swap_usage() -> Result<SwapUsage, String> {
+    let output = run_command("sysctl", &["vm.swapusage"])?;
+    parse_swap_usage(&output)
+}
 
-    let rc = unsafe {
-        libc::sysctlbyname(
-            cname.as_ptr(),
-            &mut usage as *mut _ as *mut c_void,
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 {
-        return Err("sysctl vm.swapusage failed".to_string());
+fn parse_swap_usage(text: &str) -> Result<SwapUsage, String> {
+    let mut total = None;
+    let mut used = None;
+    let mut free = None;
+
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let mut index = 0;
+    while index + 2 < tokens.len() {
+        let key = tokens[index];
+        let value = tokens[index + 2];
+        if tokens[index + 1] == "=" {
+            match key {
+                "total" => total = Some(parse_swap_value(value)?),
+                "used" => used = Some(parse_swap_value(value)?),
+                "free" => free = Some(parse_swap_value(value)?),
+                _ => {}
+            }
+            index += 3;
+            continue;
+        }
+        index += 1;
     }
 
-    Ok(usage)
+    let total = total.ok_or_else(|| "swap total missing".to_string())?;
+    let used = used.ok_or_else(|| "swap used missing".to_string())?;
+    let free = free.ok_or_else(|| "swap free missing".to_string())?;
+
+    Ok(SwapUsage {
+        total_mb: total,
+        used_mb: used,
+        free_mb: free,
+    })
+}
+
+fn parse_swap_value(token: &str) -> Result<f64, String> {
+    let trimmed = token.trim_matches(',');
+    let mut number = String::new();
+    let mut unit = String::new();
+
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            number.push(ch);
+        } else if !ch.is_whitespace() {
+            unit.push(ch);
+        }
+    }
+
+    let value: f64 = number
+        .parse()
+        .map_err(|_| format!("invalid swap value: {token}"))?;
+    let unit = unit.to_ascii_uppercase();
+
+    let mb = match unit.as_str() {
+        "K" | "KB" => value / 1024.0,
+        "M" | "MB" | "" => value,
+        "G" | "GB" => value * 1024.0,
+        "T" | "TB" => value * 1024.0 * 1024.0,
+        _ => return Err(format!("unknown swap unit: {unit}")),
+    };
+
+    if mb.is_finite() {
+        Ok(mb)
+    } else {
+        Err("swap value not finite".to_string())
+    }
 }
