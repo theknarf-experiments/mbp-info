@@ -34,8 +34,6 @@ pub struct AppState {
     collectors_rows: Vec<Vec<String>>,
     command_mode: bool,
     command_buffer: String,
-    focus_pending: bool,
-    pending_g: bool,
     command_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: Option<String>,
@@ -61,8 +59,6 @@ impl AppState {
             collectors_rows: Vec::new(),
             command_mode: false,
             command_buffer: String::new(),
-            focus_pending: false,
-            pending_g: false,
             command_history: Vec::new(),
             history_index: None,
             history_draft: None,
@@ -262,27 +258,6 @@ impl AppState {
     pub fn set_focus(&mut self, focus: FocusPanel) {
         self.focus = focus;
     }
-
-    pub fn focus_pending(&self) -> bool {
-        self.focus_pending
-    }
-
-    pub fn set_focus_pending(&mut self, pending: bool) {
-        self.focus_pending = pending;
-    }
-
-    pub fn pending_g(&self) -> bool {
-        self.pending_g
-    }
-
-    pub fn set_pending_g(&mut self, pending: bool) {
-        self.pending_g = pending;
-    }
-
-    pub fn clear_pending_g(&mut self) {
-        self.pending_g = false;
-    }
-
     pub fn jump_top(&mut self, data: &DataStore) {
         match self.focus {
             FocusPanel::Metrics => {

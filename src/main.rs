@@ -1,5 +1,6 @@
 mod collector;
 mod data;
+mod input;
 mod tui;
 
 use std::collections::HashMap;
@@ -14,7 +15,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -26,9 +27,9 @@ use crate::collector::{
     PowermetricsCollector, SwapUsageCollector, UptimeCollector,
 };
 use crate::data::DataStore;
+use crate::input::InputBindings;
 use crate::tui::{draw_ui, AppState, FocusPanel};
 
-const COMMANDS: [&str; 6] = ["q", "quit", "help", "collectors", "collector", "reauth"];
 const COLLECTOR_ACTIONS: [&str; 2] = ["on", "off"];
 
 fn main() -> io::Result<()> {
@@ -97,6 +98,7 @@ fn run_app(
 ) -> io::Result<()> {
     let mut data = DataStore::new();
     let mut app = AppState::new();
+    let mut input = InputBindings::new();
     if let Some(message) = startup_message {
         app.set_message(Some(message));
     }
@@ -134,6 +136,8 @@ fn run_app(
                     if handle_command_input(
                         key.code,
                         &mut app,
+                        &mut input,
+                        &data,
                         terminal,
                         &mut manager,
                         use_sudo,
@@ -144,51 +148,24 @@ fn run_app(
                     continue;
                 }
 
-                if app.focus_pending() {
-                    app.set_focus_pending(false);
-                    if handle_focus_move(terminal, &mut app, key.code)? {
-                        continue;
-                    }
-                }
-
-                if app.pending_g() && !matches!(key.code, KeyCode::Char('g')) {
-                    app.clear_pending_g();
-                }
-
                 match key.code {
-                    KeyCode::Char(':') => app.enter_command_mode(),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(());
+                    KeyCode::Char(':') => {
+                        app.enter_command_mode();
+                        input.clear_pending();
                     }
-                    KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.set_focus_pending(true);
-                        app.clear_pending_g();
-                    }
-                    KeyCode::Char('g') => {
-                        if app.pending_g() {
-                            app.jump_top(&data);
-                            app.clear_pending_g();
-                        } else {
-                            app.set_pending_g(true);
+                    _ => {
+                        if let Some(command) = input.resolve(key) {
+                            if execute_named_command(
+                                &command,
+                                &mut app,
+                                &data,
+                                terminal,
+                                &mut manager,
+                            )? {
+                                return Ok(());
+                            }
                         }
                     }
-                    KeyCode::Char('G') => {
-                        app.clear_pending_g();
-                        app.jump_bottom(&data);
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => match app.focus() {
-                        FocusPanel::Metrics => app.select_prev(&data),
-                        FocusPanel::Info => app.select_info_prev(&data),
-                        FocusPanel::Collectors => app.select_collectors_prev(),
-                        FocusPanel::Chart => {}
-                    },
-                    KeyCode::Down | KeyCode::Char('j') => match app.focus() {
-                        FocusPanel::Metrics => app.select_next(&data),
-                        FocusPanel::Info => app.select_info_next(&data),
-                        FocusPanel::Collectors => app.select_collectors_next(),
-                        FocusPanel::Chart => {}
-                    },
-                    _ => {}
                 }
             }
         }
@@ -286,6 +263,8 @@ fn reauthenticate(
 fn handle_command_input(
     code: KeyCode,
     app: &mut AppState,
+    input: &mut InputBindings,
+    data: &DataStore,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     manager: &mut CollectorManager,
     use_sudo: bool,
@@ -299,7 +278,16 @@ fn handle_command_input(
             let command = app.take_command();
             app.exit_command_mode();
             app.record_command(&command);
-            return run_command(command.trim(), app, terminal, manager, use_sudo, sudo_ready);
+            return run_command(
+                command.trim(),
+                app,
+                input,
+                data,
+                terminal,
+                manager,
+                use_sudo,
+                sudo_ready,
+            );
         }
         KeyCode::Up => {
             app.history_prev();
@@ -326,6 +314,8 @@ fn handle_command_input(
 fn run_command(
     command: &str,
     app: &mut AppState,
+    input: &mut InputBindings,
+    data: &DataStore,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     manager: &mut CollectorManager,
     use_sudo: bool,
@@ -337,18 +327,6 @@ fn run_command(
     };
 
     match root {
-        "q" | "quit" => Ok(true),
-        "help" => {
-            app.set_message(Some(
-                "Commands: :q, :help, :collectors, :collector on/off <id>, :reauth <collector>"
-                    .to_string(),
-            ));
-            Ok(false)
-        }
-        "collectors" => {
-            app.set_message(Some(manager.describe_collectors()));
-            Ok(false)
-        }
         "collector" => {
             let action = parts.next().unwrap_or_default();
             let id = parts.next().unwrap_or_default();
@@ -415,11 +393,174 @@ fn run_command(
             }
             Ok(false)
         }
+        "map" => {
+            let sequence = parts.next().unwrap_or_default();
+            let command = parts.next().unwrap_or_default();
+            if sequence.is_empty() || command.is_empty() {
+                app.set_error(Some("Usage: :map <keys> <command>".to_string()));
+                return Ok(false);
+            }
+            if !InputBindings::is_command_known(command) {
+                app.set_error(Some(format!("Unknown command: {command}")));
+                return Ok(false);
+            }
+            match input.bind(sequence, command) {
+                Ok(()) => app.set_message(Some(format!("Mapped {sequence} -> {command}"))),
+                Err(error) => app.set_error(Some(error)),
+            }
+            Ok(false)
+        }
+        "unmap" => {
+            let sequence = parts.next().unwrap_or_default();
+            if sequence.is_empty() {
+                app.set_error(Some("Usage: :unmap <keys>".to_string()));
+                return Ok(false);
+            }
+            match input.unbind(sequence) {
+                Ok(()) => app.set_message(Some(format!("Unmapped {sequence}"))),
+                Err(error) => app.set_error(Some(error)),
+            }
+            Ok(false)
+        }
+        _ if InputBindings::is_no_arg_command(root) => {
+            if parts.next().is_some() {
+                app.set_error(Some(format!(":{root} does not take arguments.")));
+                return Ok(false);
+            }
+            execute_named_command(root, app, data, terminal, manager)
+        }
         _ => {
             app.set_error(Some(format!("Unknown command: {root}")));
             Ok(false)
         }
     }
+}
+
+fn execute_named_command(
+    command: &str,
+    app: &mut AppState,
+    data: &DataStore,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    manager: &mut CollectorManager,
+) -> io::Result<bool> {
+    match command {
+        "q" | "quit" => Ok(true),
+        "help" => {
+            app.set_message(Some(build_help_text()));
+            Ok(false)
+        }
+        "collectors" => {
+            app.set_message(Some(manager.describe_collectors()));
+            Ok(false)
+        }
+        "jump_to_first_row" => {
+            app.jump_top(data);
+            Ok(false)
+        }
+        "jump_to_last_row" => {
+            app.jump_bottom(data);
+            Ok(false)
+        }
+        "cursor_up" => {
+            match app.focus() {
+                FocusPanel::Metrics => app.select_prev(data),
+                FocusPanel::Info => app.select_info_prev(data),
+                FocusPanel::Collectors => app.select_collectors_prev(),
+                FocusPanel::Chart => {}
+            }
+            Ok(false)
+        }
+        "cursor_down" => {
+            match app.focus() {
+                FocusPanel::Metrics => app.select_next(data),
+                FocusPanel::Info => app.select_info_next(data),
+                FocusPanel::Collectors => app.select_collectors_next(),
+                FocusPanel::Chart => {}
+            }
+            Ok(false)
+        }
+        "panel_navigate_left" => panel_navigate(terminal, app, PanelMove::Left),
+        "panel_navigate_right" => panel_navigate(terminal, app, PanelMove::Right),
+        "panel_navigate_up" => panel_navigate(terminal, app, PanelMove::Up),
+        "panel_navigate_down" => panel_navigate(terminal, app, PanelMove::Down),
+        _ => {
+            app.set_error(Some(format!("Unknown command: {command}")));
+            Ok(false)
+        }
+    }
+}
+
+fn build_help_text() -> String {
+    "Commands: :q, :help, :collectors, :collector on/off <id>, :reauth <collector>, \
+:map <keys> <command>, :unmap <keys>, :jump_to_first_row, :jump_to_last_row, \
+:cursor_up, :cursor_down, :panel_navigate_left/right/up/down"
+        .to_string()
+}
+
+enum PanelMove {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+fn panel_navigate(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut AppState,
+    direction: PanelMove,
+) -> io::Result<bool> {
+    let size = terminal.size()?;
+    let is_wide = size.width >= 90;
+
+    if is_wide {
+        match direction {
+            PanelMove::Left => match app.focus() {
+                FocusPanel::Chart => app.set_focus(FocusPanel::Metrics),
+                FocusPanel::Info => app.set_focus(FocusPanel::Collectors),
+                _ => {}
+            },
+            PanelMove::Right => match app.focus() {
+                FocusPanel::Metrics => app.set_focus(FocusPanel::Chart),
+                FocusPanel::Collectors => app.set_focus(FocusPanel::Info),
+                _ => {}
+            },
+            PanelMove::Up => match app.focus() {
+                FocusPanel::Collectors => app.set_focus(FocusPanel::Metrics),
+                FocusPanel::Info => app.set_focus(FocusPanel::Chart),
+                _ => {}
+            },
+            PanelMove::Down => match app.focus() {
+                FocusPanel::Metrics => app.set_focus(FocusPanel::Collectors),
+                FocusPanel::Chart => app.set_focus(FocusPanel::Info),
+                _ => {}
+            },
+        }
+        return Ok(false);
+    }
+
+    match direction {
+        PanelMove::Up | PanelMove::Down => {
+            let order = [
+                FocusPanel::Metrics,
+                FocusPanel::Chart,
+                FocusPanel::Info,
+                FocusPanel::Collectors,
+            ];
+            let current = order
+                .iter()
+                .position(|item| *item == app.focus())
+                .unwrap_or(0);
+            let next = if matches!(direction, PanelMove::Up) {
+                current.saturating_sub(1)
+            } else {
+                (current + 1).min(order.len() - 1)
+            };
+            app.set_focus(order[next]);
+        }
+        PanelMove::Left | PanelMove::Right => {}
+    }
+
+    Ok(false)
 }
 
 fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
@@ -437,7 +578,7 @@ fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
 
     if tokens.len() == 1 && !trailing_space {
         let prefix = tokens[0];
-        let matches: Vec<&str> = COMMANDS
+        let matches: Vec<&str> = crate::input::COMMANDS
             .iter()
             .copied()
             .filter(|command| command.starts_with(prefix))
@@ -486,6 +627,38 @@ fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
                 trailing_space,
                 collectors,
             );
+        }
+        return;
+    }
+
+    if tokens[0] == "map" {
+        if tokens.len() == 2 && trailing_space {
+            let matches: Vec<&str> = crate::input::COMMANDS
+                .iter()
+                .copied()
+                .filter(|command| {
+                    !matches!(*command, "map" | "unmap" | "collector" | "reauth")
+                })
+                .collect();
+            if let Some(completion) = resolve_completion("", &matches) {
+                let mut new_buffer = buffer.to_string();
+                new_buffer.push_str(&completion);
+                app.set_command_buffer(new_buffer);
+            }
+            return;
+        }
+
+        if tokens.len() == 3 && !trailing_space {
+            let prefix = tokens[2];
+            let matches: Vec<&str> = crate::input::COMMANDS
+                .iter()
+                .copied()
+                .filter(|command| command.starts_with(prefix))
+                .collect();
+            if let Some(completion) = resolve_completion(prefix, &matches) {
+                let new_buffer = replace_tail(&buffer, prefix, &completion);
+                app.set_command_buffer(new_buffer);
+            }
         }
     }
 }
@@ -570,80 +743,6 @@ fn replace_tail(buffer: &str, prefix: &str, completion: &str) -> String {
     new_buffer
 }
 
-fn handle_focus_move(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut AppState,
-    code: KeyCode,
-) -> io::Result<bool> {
-    let size = terminal.size()?;
-    let is_wide = size.width >= 90;
-
-    match code {
-        KeyCode::Left | KeyCode::Char('h') => {
-            if is_wide {
-                match app.focus() {
-                    FocusPanel::Chart => app.set_focus(FocusPanel::Metrics),
-                    FocusPanel::Info => app.set_focus(FocusPanel::Collectors),
-                    _ => {}
-                }
-                return Ok(true);
-            }
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            if is_wide {
-                match app.focus() {
-                    FocusPanel::Metrics => app.set_focus(FocusPanel::Chart),
-                    FocusPanel::Collectors => app.set_focus(FocusPanel::Info),
-                    _ => {}
-                }
-                return Ok(true);
-            }
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            move_focus_vertical(app, is_wide, true);
-            return Ok(true);
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            move_focus_vertical(app, is_wide, false);
-            return Ok(true);
-        }
-        KeyCode::Esc => {
-            return Ok(true);
-        }
-        _ => {}
-    }
-
-    Ok(false)
-}
-
-fn move_focus_vertical(app: &mut AppState, is_wide: bool, up: bool) {
-    if is_wide {
-        match (app.focus(), up) {
-            (FocusPanel::Collectors, true) => app.set_focus(FocusPanel::Metrics),
-            (FocusPanel::Metrics, false) => app.set_focus(FocusPanel::Collectors),
-            (FocusPanel::Info, true) => app.set_focus(FocusPanel::Chart),
-            (FocusPanel::Chart, false) => app.set_focus(FocusPanel::Info),
-            _ => {}
-        }
-    } else {
-        let order = [
-            FocusPanel::Metrics,
-            FocusPanel::Chart,
-            FocusPanel::Info,
-            FocusPanel::Collectors,
-        ];
-        let current = order
-            .iter()
-            .position(|item| *item == app.focus())
-            .unwrap_or(0);
-        let next = if up {
-            current.saturating_sub(1)
-        } else {
-            (current + 1).min(order.len() - 1)
-        };
-        app.set_focus(order[next]);
-    }
-}
 
 struct CollectorRegistration {
     id: &'static str,
