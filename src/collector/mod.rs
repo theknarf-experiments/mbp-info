@@ -231,41 +231,4 @@ pub(crate) fn bytes_to_mb(value: u64) -> f64 {
 }
 
 #[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
-mod cpu_info;
-#[cfg(target_os = "macos")]
-mod cpu_usage;
-#[cfg(target_os = "macos")]
-mod gpu_info;
-#[cfg(target_os = "macos")]
-mod memory_info;
-#[cfg(target_os = "macos")]
-mod memory_usage;
-#[cfg(target_os = "macos")]
-mod os_version;
-#[cfg(target_os = "macos")]
-mod powermetrics;
-#[cfg(target_os = "macos")]
-mod swap_usage;
-#[cfg(target_os = "macos")]
-mod uptime;
-
-#[cfg(target_os = "macos")]
-pub use cpu_info::CpuInfoCollector;
-#[cfg(target_os = "macos")]
-pub use cpu_usage::CpuUsageCollector;
-#[cfg(target_os = "macos")]
-pub use gpu_info::GpuInfoCollector;
-#[cfg(target_os = "macos")]
-pub use memory_info::MemoryInfoCollector;
-#[cfg(target_os = "macos")]
-pub use memory_usage::MemoryUsageCollector;
-#[cfg(target_os = "macos")]
-pub use os_version::OsVersionCollector;
-#[cfg(target_os = "macos")]
-pub use powermetrics::PowermetricsCollector;
-#[cfg(target_os = "macos")]
-pub use swap_usage::SwapUsageCollector;
-#[cfg(target_os = "macos")]
-pub use uptime::UptimeCollector;
+pub mod macos;

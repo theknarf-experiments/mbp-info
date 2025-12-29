@@ -1,6 +1,6 @@
 use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
-use super::{run_command, Collector};
+use crate::collector::{run_command, Collector};
 
 pub struct OsVersionCollector;
 

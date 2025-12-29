@@ -1,6 +1,6 @@
 use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
-use super::{run_command, Collector, MAX_SAMPLES};
+use crate::collector::{run_command, Collector, MAX_SAMPLES};
 
 pub struct SwapUsageCollector;
 

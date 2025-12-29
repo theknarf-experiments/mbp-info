@@ -26,11 +26,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::collector::{needs_sudo, spawn_collector, CollectorMessage};
 #[cfg(target_os = "macos")]
-use crate::collector::{
-    CpuInfoCollector, CpuUsageCollector, GpuInfoCollector, MemoryInfoCollector,
-    MemoryUsageCollector, OsVersionCollector, PowermetricsCollector, SwapUsageCollector,
-    UptimeCollector,
-};
+use crate::collector::macos;
 use crate::data::{CollectorRegistration, DashboardStore, DataStore, SeriesValue};
 use crate::input::InputBindings;
 use crate::query::{Query, QueryProvider, QueryResult, QueryRow, QuerySource, SeriesMode};
@@ -297,19 +293,7 @@ fn start_default_collectors(
 
 #[cfg(target_os = "macos")]
 fn register_collectors(use_sudo: bool) -> Vec<CollectorRegistration> {
-    vec![
-        CollectorRegistration::new(Box::new(move || {
-            Box::new(PowermetricsCollector::new(use_sudo))
-        })),
-        CollectorRegistration::new(Box::new(|| Box::new(CpuUsageCollector::new()))),
-        CollectorRegistration::new(Box::new(|| Box::new(MemoryUsageCollector::new()))),
-        CollectorRegistration::new(Box::new(|| Box::new(SwapUsageCollector::new()))),
-        CollectorRegistration::new(Box::new(|| Box::new(UptimeCollector::new()))),
-        CollectorRegistration::new(Box::new(|| Box::new(CpuInfoCollector::new()))),
-        CollectorRegistration::new(Box::new(|| Box::new(MemoryInfoCollector::new()))),
-        CollectorRegistration::new(Box::new(|| Box::new(GpuInfoCollector::new()))),
-        CollectorRegistration::new(Box::new(|| Box::new(OsVersionCollector::new()))),
-    ]
+    macos::collectors(use_sudo)
 }
 
 #[cfg(not(target_os = "macos"))]

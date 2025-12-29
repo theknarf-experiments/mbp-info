@@ -1,6 +1,6 @@
 use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
-use super::{bytes_to_mb, Collector, MAX_SAMPLES};
+use crate::collector::{bytes_to_mb, Collector, MAX_SAMPLES};
 
 pub struct MemoryUsageCollector {
     page_size: u64,

@@ -1,7 +1,7 @@
 use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
-use super::macos::sysctl_u64;
-use super::{run_command, Collector};
+use super::sysctl::sysctl_u64;
+use crate::collector::{run_command, Collector};
 
 pub struct MemoryInfoCollector;
 

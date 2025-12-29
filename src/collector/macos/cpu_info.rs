@@ -1,7 +1,7 @@
 use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
-use super::macos::{sysctl_string, sysctl_u64};
-use super::Collector;
+use super::sysctl::{sysctl_string, sysctl_u64};
+use crate::collector::Collector;
 
 pub struct CpuInfoCollector;
 

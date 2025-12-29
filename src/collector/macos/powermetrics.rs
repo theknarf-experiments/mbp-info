@@ -2,7 +2,7 @@ use std::process::Command;
 
 use crate::data::SampleData;
 
-use super::{parse_key_value_lines, Collector};
+use crate::collector::{parse_key_value_lines, Collector};
 
 pub struct PowermetricsCollector {
     use_sudo: bool,
