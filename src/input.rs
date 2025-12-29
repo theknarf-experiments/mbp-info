@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 pub enum KeyToken {
     Char(char),
     Ctrl(char),
+    Leader,
     Up,
     Down,
     Left,
@@ -22,6 +23,8 @@ pub const COMMANDS: &[&str] = &[
     "help",
     "collectors",
     "dashboards",
+    "leader_set",
+    "leader_unset",
     "dashboard_new",
     "dashboard_delete",
     "dashboard_next",
@@ -85,6 +88,7 @@ const NO_ARG_COMMANDS: &[&str] = &[
 pub struct InputBindings {
     map: HashMap<Vec<KeyToken>, String>,
     pending: Vec<KeyToken>,
+    leader: Option<char>,
 }
 
 impl InputBindings {
@@ -92,6 +96,7 @@ impl InputBindings {
         let mut bindings = Self {
             map: HashMap::new(),
             pending: Vec::new(),
+            leader: Some(','),
         };
         bindings.load_defaults();
         bindings
@@ -182,18 +187,31 @@ impl InputBindings {
         rows
     }
 
+    pub fn set_leader(&mut self, leader: Option<char>) {
+        self.leader = leader;
+        self.pending.clear();
+    }
+
     fn lookup_exact(&self, tokens: &[KeyToken]) -> Option<String> {
-        self.map.get(tokens).cloned()
+        if let Some(command) = self.map.get(tokens) {
+            return Some(command.clone());
+        }
+        self.map
+            .iter()
+            .find(|(sequence, _)| matches_sequence(tokens, sequence, self.leader))
+            .map(|(_, command)| command.clone())
     }
 
     fn has_prefix(&self, tokens: &[KeyToken]) -> bool {
-        self.map.keys().any(|mapped| is_prefix(tokens, mapped))
+        self.map
+            .keys()
+            .any(|mapped| is_prefix_with_leader(tokens, mapped, self.leader))
     }
 
     fn has_prefix_longer(&self, tokens: &[KeyToken]) -> bool {
         self.map
             .keys()
-            .any(|mapped| mapped.len() > tokens.len() && is_prefix(tokens, mapped))
+            .any(|mapped| mapped.len() > tokens.len() && is_prefix_with_leader(tokens, mapped, self.leader))
     }
 
     fn load_defaults(&mut self) {
@@ -236,6 +254,12 @@ impl InputBindings {
             "panel_navigate_right",
         );
         self.insert_tokens(vec![KeyToken::Ctrl('c')], "quit");
+
+        self.insert_tokens(vec![KeyToken::Leader, KeyToken::Char('n')], "dashboard_next");
+        self.insert_tokens(vec![KeyToken::Leader, KeyToken::Char('p')], "dashboard_prev");
+        self.insert_tokens(vec![KeyToken::Leader, KeyToken::Char('c')], "dashboard_new");
+        self.insert_tokens(vec![KeyToken::Leader, KeyToken::Char('h')], "help");
+        self.insert_tokens(vec![KeyToken::Leader, KeyToken::Char('q')], "quit");
     }
 
     fn insert_tokens(&mut self, tokens: Vec<KeyToken>, command: &str) {
@@ -288,6 +312,7 @@ fn parse_bracket_token(token: &str) -> Result<KeyToken, String> {
     }
 
     match lower.as_str() {
+        "leader" => Ok(KeyToken::Leader),
         "up" => Ok(KeyToken::Up),
         "down" => Ok(KeyToken::Down),
         "left" => Ok(KeyToken::Left),
@@ -321,8 +346,37 @@ fn key_event_to_token(event: KeyEvent) -> Option<KeyToken> {
     }
 }
 
-fn is_prefix(prefix: &[KeyToken], sequence: &[KeyToken]) -> bool {
-    sequence.len() >= prefix.len() && sequence[..prefix.len()] == *prefix
+fn is_prefix_with_leader(
+    prefix: &[KeyToken],
+    sequence: &[KeyToken],
+    leader: Option<char>,
+) -> bool {
+    if sequence.len() < prefix.len() {
+        return false;
+    }
+    sequence[..prefix.len()]
+        .iter()
+        .zip(prefix.iter())
+        .all(|(mapped, input)| token_matches(input, mapped, leader))
+}
+
+fn matches_sequence(input: &[KeyToken], sequence: &[KeyToken], leader: Option<char>) -> bool {
+    if input.len() != sequence.len() {
+        return false;
+    }
+    input
+        .iter()
+        .zip(sequence.iter())
+        .all(|(input_token, mapped_token)| token_matches(input_token, mapped_token, leader))
+}
+
+fn token_matches(input: &KeyToken, mapped: &KeyToken, leader: Option<char>) -> bool {
+    match mapped {
+        KeyToken::Leader => leader
+            .map(|leader| *input == KeyToken::Char(leader))
+            .unwrap_or(false),
+        _ => input == mapped,
+    }
 }
 
 fn canonical_command(command: &str) -> Option<&'static str> {
@@ -336,6 +390,8 @@ fn canonical_command(command: &str) -> Option<&'static str> {
         "dashboard_next" => Some("dashboard_next"),
         "dashboard_prev" => Some("dashboard_prev"),
         "dashboard_goto" => Some("dashboard_goto"),
+        "leader_set" => Some("leader_set"),
+        "leader_unset" => Some("leader_unset"),
         "collector" => Some("collector"),
         "reauth" => Some("reauth"),
         "map" => Some("map"),
@@ -369,6 +425,7 @@ fn format_token(token: &KeyToken) -> String {
     match token {
         KeyToken::Char(ch) => ch.to_string(),
         KeyToken::Ctrl(ch) => format!("<c-{ch}>"),
+        KeyToken::Leader => "<leader>".to_string(),
         KeyToken::Up => "<up>".to_string(),
         KeyToken::Down => "<down>".to_string(),
         KeyToken::Left => "<left>".to_string(),

@@ -486,6 +486,30 @@ fn run_command(
             }
             Ok(false)
         }
+        "leader_set" => {
+            let value = parts.next().unwrap_or_default();
+            if value.is_empty() {
+                app.set_error(Some("Usage: :leader_set <key>".to_string()));
+                return Ok(false);
+            }
+            let mut chars = value.chars();
+            let Some(ch) = chars.next() else {
+                app.set_error(Some("Usage: :leader_set <key>".to_string()));
+                return Ok(false);
+            };
+            if chars.next().is_some() {
+                app.set_error(Some("Leader key must be a single character.".to_string()));
+                return Ok(false);
+            }
+            input.set_leader(Some(ch));
+            app.set_message(Some(format!("Leader set to '{ch}'.")));
+            Ok(false)
+        }
+        "leader_unset" => {
+            input.set_leader(None);
+            app.set_message(Some("Leader unset.".to_string()));
+            Ok(false)
+        }
         "map" => {
             let sequence = parts.next().unwrap_or_default();
             if sequence.is_empty() {
@@ -702,6 +726,8 @@ fn build_help_rows() -> Vec<Vec<String>> {
             ":dashboard_goto <n>".to_string(),
             "switch dashboard".to_string(),
         ],
+        vec![":leader_set <key>".to_string(), "set leader key".to_string()],
+        vec![":leader_unset".to_string(), "unset leader key".to_string()],
         vec![
             ":collector on <id>".to_string(),
             "enable collector".to_string(),
