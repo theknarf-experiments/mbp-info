@@ -4,7 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, Borders, Chart, Dataset, List, ListItem, ListState, Paragraph},
+    widgets::{Axis, Block, Borders, Chart, Clear, Dataset, List, ListItem, ListState, Paragraph},
 };
 
 use crate::collector::SAMPLE_INTERVAL;
@@ -26,8 +26,7 @@ static GROUP_RULES: &[(&str, &[&str])] = &[(
 
 pub struct AppState {
     selected: usize,
-    error: Option<String>,
-    message: Option<String>,
+    notice: Option<Notice>,
     focus: FocusPanel,
     info_selected: usize,
     collectors_selected: usize,
@@ -37,6 +36,13 @@ pub struct AppState {
     command_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: Option<String>,
+}
+
+struct Notice {
+    title: String,
+    rows: Vec<Vec<String>>,
+    selected: usize,
+    is_error: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -51,8 +57,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             selected: 0,
-            error: None,
-            message: None,
+            notice: None,
             focus: FocusPanel::Metrics,
             info_selected: 0,
             collectors_selected: 0,
@@ -258,6 +263,7 @@ impl AppState {
     pub fn set_focus(&mut self, focus: FocusPanel) {
         self.focus = focus;
     }
+
     pub fn jump_top(&mut self, data: &DataStore) {
         match self.focus {
             FocusPanel::Metrics => {
@@ -304,25 +310,88 @@ impl AppState {
     }
 
     pub fn set_error(&mut self, error: Option<String>) {
-        self.error = error;
-        if self.error.is_some() {
-            self.message = None;
+        match error {
+            Some(error) => self.set_notice("Error", rows_from_text(&error), true),
+            None => self.clear_notice(),
         }
-    }
-
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
     }
 
     pub fn set_message(&mut self, message: Option<String>) {
-        self.message = message;
-        if self.message.is_some() {
-            self.error = None;
+        match message {
+            Some(message) => self.set_notice("Notice", rows_from_text(&message), false),
+            None => self.clear_notice(),
         }
     }
 
-    pub fn message(&self) -> Option<&str> {
-        self.message.as_deref()
+    pub fn set_notice(&mut self, title: &str, rows: Vec<Vec<String>>, is_error: bool) {
+        let selected = if rows.is_empty() { 0 } else { 0 };
+        self.notice = Some(Notice {
+            title: title.to_string(),
+            rows,
+            selected,
+            is_error,
+        });
+    }
+
+    pub fn notice_rows(&self) -> Option<&Vec<Vec<String>>> {
+        self.notice.as_ref().map(|notice| &notice.rows)
+    }
+
+    pub fn notice_title(&self) -> Option<&str> {
+        self.notice.as_ref().map(|notice| notice.title.as_str())
+    }
+
+    pub fn notice_selected(&self) -> usize {
+        self.notice.as_ref().map(|notice| notice.selected).unwrap_or(0)
+    }
+
+    pub fn notice_is_error(&self) -> bool {
+        self.notice.as_ref().map(|notice| notice.is_error).unwrap_or(false)
+    }
+
+    pub fn select_notice_next(&mut self) {
+        let Some(notice) = self.notice.as_mut() else {
+            return;
+        };
+        if notice.rows.is_empty() {
+            return;
+        }
+        notice.selected = (notice.selected + 1).min(notice.rows.len() - 1);
+    }
+
+    pub fn select_notice_prev(&mut self) {
+        let Some(notice) = self.notice.as_mut() else {
+            return;
+        };
+        if notice.rows.is_empty() {
+            return;
+        }
+        notice.selected = notice.selected.saturating_sub(1);
+    }
+
+    pub fn jump_notice_top(&mut self) {
+        if let Some(notice) = self.notice.as_mut() {
+            if !notice.rows.is_empty() {
+                notice.selected = 0;
+            }
+        }
+    }
+
+    pub fn jump_notice_bottom(&mut self) {
+        if let Some(notice) = self.notice.as_mut() {
+            let count = notice.rows.len();
+            if count > 0 {
+                notice.selected = count - 1;
+            }
+        }
+    }
+
+    pub fn has_notice(&self) -> bool {
+        self.notice.is_some()
+    }
+
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
     }
 
     fn clear_history_navigation(&mut self) {
@@ -337,11 +406,7 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
     let size = frame.size();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(size);
 
     if size.width < 90 {
@@ -355,26 +420,31 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
             ])
             .split(chunks[0]);
 
-        draw_metrics_list(frame, data, app, app.focus() == FocusPanel::Metrics, body_chunks[0]);
+        let metrics_area = body_chunks[0];
+        let chart_area = body_chunks[1];
+        let info_area = body_chunks[2];
+        let collectors_area = body_chunks[3];
+
+        draw_metrics_list(frame, data, app, app.focus() == FocusPanel::Metrics, metrics_area);
         draw_chart(
             frame,
             data,
             app,
             app.focus() == FocusPanel::Chart,
-            body_chunks[1],
+            chart_area,
         );
         draw_info_panel(
             frame,
             data,
             app,
             app.focus() == FocusPanel::Info,
-            body_chunks[2],
+            info_area,
         );
         draw_collectors_panel(
             frame,
             app,
             app.focus() == FocusPanel::Collectors,
-            body_chunks[3],
+            collectors_area,
         );
     } else {
         let body_chunks = Layout::default()
@@ -392,40 +462,48 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
             .split(body_chunks[1]);
 
-        draw_metrics_list(
-            frame,
-            data,
-            app,
-            app.focus() == FocusPanel::Metrics,
-            left_chunks[0],
-        );
+        let metrics_area = left_chunks[0];
+        let collectors_area = left_chunks[1];
+        let chart_area = right_chunks[0];
+        let info_area = right_chunks[1];
+
+        draw_metrics_list(frame, data, app, app.focus() == FocusPanel::Metrics, metrics_area);
         draw_collectors_panel(
             frame,
             app,
             app.focus() == FocusPanel::Collectors,
-            left_chunks[1],
+            collectors_area,
         );
         draw_chart(
             frame,
             data,
             app,
             app.focus() == FocusPanel::Chart,
-            right_chunks[0],
+            chart_area,
         );
         draw_info_panel(
             frame,
             data,
             app,
             app.focus() == FocusPanel::Info,
-            right_chunks[1],
+            info_area,
         );
     }
 
-    let status = build_status_line(app);
-    let footer = Paragraph::new(Line::from(status));
-    frame.render_widget(footer, chunks[1]);
+    if let Some(rows) = app.notice_rows() {
+        if let Some(title) = app.notice_title() {
+            draw_notice_popup(
+                frame,
+                size,
+                title,
+                rows,
+                app.notice_selected(),
+                app.notice_is_error(),
+            );
+        }
+    }
 
-    draw_command_bar(frame, app, chunks[2]);
+    draw_command_bar(frame, app, chunks[1]);
 }
 
 fn draw_metrics_list(
@@ -643,6 +721,29 @@ fn draw_collectors_panel(frame: &mut Frame, app: &AppState, focused: bool, area:
 
 fn draw_table(
     frame: &mut Frame,
+    rows: Vec<Vec<String>>,
+    area: Rect,
+    focused: bool,
+    selected: usize,
+    title: &str,
+    empty_text: &str,
+    right_align_last: bool,
+) {
+    draw_table_with_style(
+        frame,
+        rows,
+        area,
+        focused,
+        selected,
+        title,
+        empty_text,
+        right_align_last,
+        None,
+    );
+}
+
+fn draw_table_with_style(
+    frame: &mut Frame,
     mut rows: Vec<Vec<String>>,
     area: Rect,
     focused: bool,
@@ -650,6 +751,7 @@ fn draw_table(
     title: &str,
     empty_text: &str,
     right_align_last: bool,
+    border_style: Option<Style>,
 ) {
     if rows.is_empty() {
         rows.push(vec![empty_text.to_string()]);
@@ -704,7 +806,10 @@ fn draw_table(
 
     let mut block = Block::default().title(title).borders(Borders::ALL);
     if focused {
-        block = block.border_style(Style::default().fg(Color::Cyan));
+        let style = border_style.unwrap_or_else(|| Style::default().fg(Color::Cyan));
+        block = block.border_style(style);
+    } else if let Some(style) = border_style {
+        block = block.border_style(style);
     }
     let list = List::new(items)
         .block(block)
@@ -729,16 +834,64 @@ fn draw_command_bar(frame: &mut Frame, app: &AppState, area: Rect) {
     frame.render_widget(command, area);
 }
 
-fn build_status_line(app: &AppState) -> String {
-    if let Some(error) = app.error() {
-        return format!("Error: {error}");
+fn draw_notice_popup(
+    frame: &mut Frame,
+    size: Rect,
+    title: &str,
+    rows: &Vec<Vec<String>>,
+    selected: usize,
+    is_error: bool,
+) {
+    let max_width = size.width.saturating_sub(4);
+    let max_height = size.height.saturating_sub(4);
+    if max_width < 20 || max_height < 6 {
+        return;
     }
 
-    if let Some(message) = app.message() {
-        return message.to_string();
+    let width = ((size.width as f32) * 0.7) as u16;
+    let height = ((size.height as f32) * 0.6) as u16;
+    let width = width.max(40).min(max_width);
+    let height = height.max(10).min(max_height);
+
+    let x = size.x + (size.width.saturating_sub(width)) / 2;
+    let y = size.y + (size.height.saturating_sub(height)) / 2;
+    let popup_area = Rect { x, y, width, height };
+
+    frame.render_widget(Clear, popup_area);
+
+    let mut temp_rows = rows.clone();
+    if temp_rows.is_empty() {
+        temp_rows.push(vec!["No output.".to_string()]);
     }
 
-    String::new()
+    let mut selected = selected.min(temp_rows.len().saturating_sub(1));
+    if temp_rows.is_empty() {
+        selected = 0;
+    }
+
+    let border_style = if is_error {
+        Some(Style::default().fg(Color::LightRed))
+    } else {
+        None
+    };
+
+    draw_table_with_style(
+        frame,
+        temp_rows,
+        popup_area,
+        true,
+        selected,
+        title,
+        "No output.",
+        false,
+        border_style,
+    );
+}
+
+fn rows_from_text(text: &str) -> Vec<Vec<String>> {
+    text.lines()
+        .map(|line| vec![line.to_string()])
+        .collect()
 }
 
 fn format_value(value: f64) -> String {

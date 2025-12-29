@@ -144,9 +144,9 @@ impl InputBindings {
         NO_ARG_COMMANDS.contains(&canonical)
     }
 
-    pub fn format_mappings(&self) -> String {
+    pub fn mapping_rows(&self) -> Vec<Vec<String>> {
         if self.map.is_empty() {
-            return "No key mappings.".to_string();
+            return vec![vec!["No key mappings.".to_string()]];
         }
 
         let mut entries: Vec<(String, String)> = self
@@ -156,12 +156,10 @@ impl InputBindings {
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let rendered: Vec<String> = entries
-            .iter()
-            .map(|(sequence, command)| format!("{sequence} -> {command}"))
-            .collect();
-
-        format!("Mappings: {}", rendered.join(", "))
+        entries
+            .into_iter()
+            .map(|(sequence, command)| vec![sequence, command])
+            .collect()
     }
 
     fn lookup_exact(&self, tokens: &[KeyToken]) -> Option<String> {

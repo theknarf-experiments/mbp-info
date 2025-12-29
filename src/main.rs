@@ -115,7 +115,6 @@ fn run_app(
                     manager.record_sample(collector);
                     data.apply_sample(sample);
                     app.clamp_selection(&data);
-                    app.set_error(None);
                 }
                 CollectorMessage::Error { collector, error } => {
                     app.set_error(Some(format!("{collector}: {error}")));
@@ -146,6 +145,22 @@ fn run_app(
                         return Ok(());
                     }
                     continue;
+                }
+
+                if app.has_notice() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.clear_notice();
+                            input.clear_pending();
+                            continue;
+                        }
+                        KeyCode::Char('q') if key.modifiers.is_empty() => {
+                            app.clear_notice();
+                            input.clear_pending();
+                            continue;
+                        }
+                        _ => {}
+                    }
                 }
 
                 match key.code {
@@ -397,7 +412,7 @@ fn run_command(
         "map" => {
             let sequence = parts.next().unwrap_or_default();
             if sequence.is_empty() {
-                app.set_message(Some(input.format_mappings()));
+                app.set_notice("Mappings", input.mapping_rows(), false);
                 return Ok(false);
             }
             let command = parts.next().unwrap_or_default();
@@ -428,7 +443,7 @@ fn run_command(
             Ok(false)
         }
         "maps" => {
-            app.set_message(Some(input.format_mappings()));
+            app.set_notice("Mappings", input.mapping_rows(), false);
             Ok(false)
         }
         _ if InputBindings::is_no_arg_command(root) => {
@@ -453,18 +468,40 @@ fn execute_named_command(
     manager: &mut CollectorManager,
     input: &InputBindings,
 ) -> io::Result<bool> {
+    if app.has_notice() {
+        match command {
+            "cursor_up" => {
+                app.select_notice_prev();
+                return Ok(false);
+            }
+            "cursor_down" => {
+                app.select_notice_next();
+                return Ok(false);
+            }
+            "jump_to_first_row" => {
+                app.jump_notice_top();
+                return Ok(false);
+            }
+            "jump_to_last_row" => {
+                app.jump_notice_bottom();
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+
     match command {
         "q" | "quit" => Ok(true),
         "help" => {
-            app.set_message(Some(build_help_text()));
+            app.set_notice("Help", build_help_rows(), false);
             Ok(false)
         }
         "collectors" => {
-            app.set_message(Some(manager.describe_collectors()));
+            app.set_notice("Collectors", manager.collector_notice_rows(), false);
             Ok(false)
         }
         "maps" => {
-            app.set_message(Some(input.format_mappings()));
+            app.set_notice("Mappings", input.mapping_rows(), false);
             Ok(false)
         }
         "jump_to_first_row" => {
@@ -504,11 +541,29 @@ fn execute_named_command(
     }
 }
 
-fn build_help_text() -> String {
-    "Commands: :q, :help, :collectors, :collector on/off <id>, :reauth <collector>, \
-:map <keys> <command>, :unmap <keys>, :maps, :jump_to_first_row, :jump_to_last_row, \
-:cursor_up, :cursor_down, :panel_navigate_left/right/up/down"
-        .to_string()
+fn build_help_rows() -> Vec<Vec<String>> {
+    vec![
+        vec![":q".to_string(), "quit".to_string()],
+        vec![":help".to_string(), "show this help".to_string()],
+        vec![":collectors".to_string(), "list collectors".to_string()],
+        vec![":collector on <id>".to_string(), "enable collector".to_string()],
+        vec![":collector off <id>".to_string(), "disable collector".to_string()],
+        vec![
+            ":reauth <collector>".to_string(),
+            "sudo re-auth for collector".to_string(),
+        ],
+        vec![":map <keys> <command>".to_string(), "bind keys".to_string()],
+        vec![":unmap <keys>".to_string(), "remove key bind".to_string()],
+        vec![":maps".to_string(), "list key binds".to_string()],
+        vec![":jump_to_first_row".to_string(), "jump to top".to_string()],
+        vec![":jump_to_last_row".to_string(), "jump to bottom".to_string()],
+        vec![":cursor_up".to_string(), "move selection up".to_string()],
+        vec![":cursor_down".to_string(), "move selection down".to_string()],
+        vec![
+            ":panel_navigate_left/right/up/down".to_string(),
+            "move focus between panels".to_string(),
+        ],
+    ]
 }
 
 enum PanelMove {
@@ -841,6 +896,18 @@ impl CollectorManager {
             .collect()
     }
 
+    fn collector_notice_rows(&self) -> Vec<Vec<String>> {
+        let mut rows = vec![vec![
+            "Name".to_string(),
+            "ID".to_string(),
+            "Status".to_string(),
+            "Interval".to_string(),
+            "Last update".to_string(),
+        ]];
+        rows.extend(self.collector_rows());
+        rows
+    }
+
     fn requires_sudo(&self, id: &str) -> Option<bool> {
         self.registrations
             .iter()
@@ -896,17 +963,4 @@ impl CollectorManager {
         Ok(())
     }
 
-    fn describe_collectors(&self) -> String {
-        let mut entries = Vec::new();
-        for reg in &self.registrations {
-            let status = if self.running.contains_key(reg.id) {
-                "on"
-            } else {
-                "off"
-            };
-            let sudo = if reg.requires_sudo { " sudo" } else { "" };
-            entries.push(format!("{} - {} ({status}{sudo})", reg.id, reg.name));
-        }
-        format!("Collectors: {}", entries.join(", "))
-    }
 }
