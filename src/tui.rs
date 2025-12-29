@@ -523,6 +523,7 @@ fn draw_metrics_list(
     let rows = metrics_rows(&result, app.selected, focused);
     let table = TuiTable::new(
         result.title,
+        result.columns,
         rows,
         app.selected,
         focused,
@@ -640,6 +641,7 @@ fn draw_info_panel(frame: &mut Frame, data: &DataStore, app: &AppState, focused:
     let rows = rows_from_query(&result);
     let table = TuiTable::new(
         result.title,
+        result.columns,
         rows,
         app.info_selected(),
         focused,
@@ -660,6 +662,7 @@ fn draw_collectors_panel(
     let rows = rows_from_query(&result);
     let table = TuiTable::new(
         result.title,
+        result.columns,
         rows,
         app.collectors_selected(),
         focused,
@@ -671,6 +674,7 @@ fn draw_collectors_panel(
 
 fn draw_table_with_style(
     frame: &mut Frame,
+    columns: &[String],
     mut rows: Vec<Vec<String>>,
     area: Rect,
     focused: bool,
@@ -684,19 +688,30 @@ fn draw_table_with_style(
         rows.push(vec![empty_text.to_string()]);
     }
 
-    let columns = rows.iter().map(|row| row.len()).max().unwrap_or(1);
-    let right_align = right_align_last && columns > 1;
-    let mut widths = vec![1usize; columns];
+    let column_count = rows
+        .iter()
+        .map(|row| row.len())
+        .max()
+        .unwrap_or(1)
+        .max(columns.len().max(1));
+    let right_align = right_align_last && column_count > 1;
+    let mut widths = vec![1usize; column_count];
     for row in &rows {
         for (index, col) in row.iter().enumerate() {
             widths[index] = widths[index].max(col.len().max(1));
         }
     }
+    for (index, col) in columns.iter().enumerate() {
+        widths[index] = widths[index].max(col.len().max(1));
+    }
     if let Some(first_width) = widths.get_mut(0) {
         *first_width = (*first_width).min(40);
     }
 
-    let available_rows = area.height.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2);
+    let show_header = !columns.is_empty() && inner_height > 0;
+    let header_height = if show_header { 1 } else { 0 };
+    let available_rows = inner_height.saturating_sub(header_height) as usize;
     let total = rows.len();
     let selected = selected.min(total.saturating_sub(1));
     let start = if available_rows == 0 || selected < available_rows {
@@ -711,11 +726,11 @@ fn draw_table_with_style(
         .skip(start)
         .take(end - start)
         .map(|row| {
-            let mut parts = Vec::with_capacity(columns);
-            for index in 0..columns {
+            let mut parts = Vec::with_capacity(column_count);
+            for index in 0..column_count {
                 let value = row.get(index).map(String::as_str).unwrap_or("");
                 let width = widths.get(index).copied().unwrap_or(1);
-                let formatted = if right_align && index + 1 == columns {
+                let formatted = if right_align && index + 1 == column_count {
                     format!("{value:>width$}")
                 } else {
                     format!("{value:<width$}")
@@ -738,21 +753,75 @@ fn draw_table_with_style(
     } else if let Some(style) = border_style {
         block = block.border_style(style);
     }
+    frame.render_widget(block, area);
+
+    let inner = Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: inner_height,
+    };
+    let (header_area, list_area) = if show_header {
+        (
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            },
+            Rect {
+                x: inner.x,
+                y: inner.y.saturating_add(1),
+                width: inner.width,
+                height: inner.height.saturating_sub(1),
+            },
+        )
+    } else {
+        (
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 0,
+            },
+            inner,
+        )
+    };
+
+    let highlight_symbol = ">> ";
+    if show_header {
+        let mut parts = Vec::with_capacity(column_count);
+        for index in 0..column_count {
+            let value = columns.get(index).map(String::as_str).unwrap_or("");
+            let width = widths.get(index).copied().unwrap_or(1);
+            let formatted = if right_align && index + 1 == column_count {
+                format!("{value:>width$}")
+            } else {
+                format!("{value:<width$}")
+            };
+            parts.push(formatted);
+        }
+        let prefix = " ".repeat(highlight_symbol.chars().count());
+        let header = Paragraph::new(Line::from(format!("{prefix}{}", parts.join(" "))))
+            .style(Style::default().add_modifier(Modifier::BOLD));
+        frame.render_widget(header, header_area);
+    }
+
     let list = List::new(items)
-        .block(block)
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol(">> ");
+        .highlight_symbol(highlight_symbol);
 
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(list, list_area, &mut state);
 }
 
 struct TuiTable {
     title: String,
+    columns: Vec<String>,
     rows: Vec<Vec<String>>,
     selected: usize,
     focused: bool,
@@ -764,6 +833,7 @@ struct TuiTable {
 impl TuiTable {
     fn new(
         title: String,
+        columns: Vec<String>,
         rows: Vec<Vec<String>>,
         selected: usize,
         focused: bool,
@@ -772,6 +842,7 @@ impl TuiTable {
     ) -> Self {
         Self {
             title,
+            columns,
             rows,
             selected,
             focused,
@@ -791,6 +862,7 @@ impl TuiTable {
 fn draw_tui_table(frame: &mut Frame, table: &TuiTable, area: Rect) {
     draw_table_with_style(
         frame,
+        &table.columns,
         table.rows.clone(),
         area,
         table.focused,
@@ -860,6 +932,7 @@ fn draw_notice_popup(
 
     let table = TuiTable::new(
         title.to_string(),
+        Vec::new(),
         temp_rows,
         selected,
         true,
