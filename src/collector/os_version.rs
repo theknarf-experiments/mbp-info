@@ -1,4 +1,4 @@
-use crate::data::{ParsedInfo, SampleData};
+use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
 use super::{run_command, Collector};
 
@@ -24,32 +24,38 @@ impl Collector for OsVersionCollector {
     }
 
     fn sample(&mut self) -> Result<SampleData, String> {
-        let mut info = Vec::new();
+        let mut entries = Vec::new();
 
         if let Ok(name) = run_command("sw_vers", &["-productName"]) {
-            info.push(ParsedInfo {
+            entries.push(ParsedDatum {
+                key: "macOS Name".to_string(),
                 label: "macOS Name".to_string(),
-                value: name,
+                unit: String::new(),
+                retention: Retention::Latest,
+                value: SeriesValue::Text(name),
             });
         }
 
         if let Ok(version) = run_command("sw_vers", &["-productVersion"]) {
-            info.push(ParsedInfo {
+            entries.push(ParsedDatum {
+                key: "macOS Version".to_string(),
                 label: "macOS Version".to_string(),
-                value: version,
+                unit: String::new(),
+                retention: Retention::Latest,
+                value: SeriesValue::Text(version),
             });
         }
 
         if let Ok(build) = run_command("sw_vers", &["-buildVersion"]) {
-            info.push(ParsedInfo {
+            entries.push(ParsedDatum {
+                key: "macOS Build".to_string(),
                 label: "macOS Build".to_string(),
-                value: build,
+                unit: String::new(),
+                retention: Retention::Latest,
+                value: SeriesValue::Text(build),
             });
         }
 
-        Ok(SampleData {
-            metrics: Vec::new(),
-            info,
-        })
+        Ok(SampleData { entries })
     }
 }

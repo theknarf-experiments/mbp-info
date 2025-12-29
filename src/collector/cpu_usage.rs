@@ -1,4 +1,4 @@
-use crate::data::{ParsedMetric, SampleData};
+use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue, MAX_SAMPLES};
 
 use super::Collector;
 
@@ -28,15 +28,14 @@ impl Collector for CpuUsageCollector {
             None => {
                 self.last_ticks = Some(current);
                 return Ok(SampleData {
-                    metrics: Vec::new(),
-                    info: Vec::new(),
+                    entries: Vec::new(),
                 });
             }
         };
 
         self.last_ticks = Some(current.clone());
 
-        let mut metrics = Vec::new();
+        let mut entries = Vec::new();
         for (index, (now, prev)) in current.iter().zip(previous.iter()).enumerate() {
             let deltas: Vec<u64> = now
                 .iter()
@@ -50,18 +49,16 @@ impl Collector for CpuUsageCollector {
             let used = deltas[0] + deltas[1] + deltas[3];
             let usage = (used as f64 / total as f64) * 100.0;
             let label = format!("CPU Core {} usage", index);
-            metrics.push(ParsedMetric {
-                key: format!("{}|%", label),
+            entries.push(ParsedDatum {
+                key: format!("{label}|%"),
                 label,
                 unit: "%".to_string(),
-                value: usage,
+                retention: Retention::Rolling(MAX_SAMPLES),
+                value: SeriesValue::Number(usage),
             });
         }
 
-        Ok(SampleData {
-            metrics,
-            info: Vec::new(),
-        })
+        Ok(SampleData { entries })
     }
 }
 

@@ -22,11 +22,13 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::collector::{
-    needs_sudo, spawn_collector, Collector, CollectorMessage, CpuInfoCollector, CpuUsageCollector,
+    needs_sudo, spawn_collector, CollectorMessage, CpuInfoCollector, CpuUsageCollector,
     GpuInfoCollector, MemoryInfoCollector, MemoryUsageCollector, OsVersionCollector,
     PowermetricsCollector, SwapUsageCollector, UptimeCollector,
 };
-use crate::data::DataStore;
+use crate::data::{
+    CollectorRegistration, DataStore, Query, QueryProvider, QueryResult, QuerySource, TableResult,
+};
 use crate::input::InputBindings;
 use crate::tui::{draw_ui, AppState, FocusPanel};
 
@@ -122,8 +124,8 @@ fn run_app(
             }
         }
 
-        app.set_collectors_rows(manager.collector_rows());
-        terminal.draw(|frame| draw_ui(frame, &data, &app))?;
+        app.set_collectors_count(manager.collector_count());
+        terminal.draw(|frame| draw_ui(frame, &data, &manager, &app))?;
 
         if event::poll(tick_rate)? {
             if let Event::Key(key) = event::read()? {
@@ -497,7 +499,15 @@ fn execute_named_command(
             Ok(false)
         }
         "collectors" => {
-            app.set_notice("Collectors", manager.collector_notice_rows(), false);
+            match manager.query(Query::collectors_table(app.collectors_selected())) {
+                QueryResult::Table(table) => {
+                    let TableResult { title, rows, .. } = table;
+                    app.set_notice(&title, rows, false);
+                }
+                QueryResult::Series(_) => {
+                    app.set_error(Some("Collectors query did not return a table.".to_string()));
+                }
+            }
             Ok(false)
         }
         "maps" => {
@@ -546,8 +556,14 @@ fn build_help_rows() -> Vec<Vec<String>> {
         vec![":q".to_string(), "quit".to_string()],
         vec![":help".to_string(), "show this help".to_string()],
         vec![":collectors".to_string(), "list collectors".to_string()],
-        vec![":collector on <id>".to_string(), "enable collector".to_string()],
-        vec![":collector off <id>".to_string(), "disable collector".to_string()],
+        vec![
+            ":collector on <id>".to_string(),
+            "enable collector".to_string(),
+        ],
+        vec![
+            ":collector off <id>".to_string(),
+            "disable collector".to_string(),
+        ],
         vec![
             ":reauth <collector>".to_string(),
             "sudo re-auth for collector".to_string(),
@@ -556,9 +572,15 @@ fn build_help_rows() -> Vec<Vec<String>> {
         vec![":unmap <keys>".to_string(), "remove key bind".to_string()],
         vec![":maps".to_string(), "list key binds".to_string()],
         vec![":jump_to_first_row".to_string(), "jump to top".to_string()],
-        vec![":jump_to_last_row".to_string(), "jump to bottom".to_string()],
+        vec![
+            ":jump_to_last_row".to_string(),
+            "jump to bottom".to_string(),
+        ],
         vec![":cursor_up".to_string(), "move selection up".to_string()],
-        vec![":cursor_down".to_string(), "move selection down".to_string()],
+        vec![
+            ":cursor_down".to_string(),
+            "move selection down".to_string(),
+        ],
         vec![
             ":panel_navigate_left/right/up/down".to_string(),
             "move focus between panels".to_string(),
@@ -705,9 +727,7 @@ fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
             let matches: Vec<&str> = crate::input::COMMANDS
                 .iter()
                 .copied()
-                .filter(|command| {
-                    !matches!(*command, "map" | "unmap" | "collector" | "reauth")
-                })
+                .filter(|command| !matches!(*command, "map" | "unmap" | "collector" | "reauth"))
                 .collect();
             if let Some(completion) = resolve_completion("", &matches) {
                 let mut new_buffer = buffer.to_string();
@@ -812,28 +832,6 @@ fn replace_tail(buffer: &str, prefix: &str, completion: &str) -> String {
     new_buffer
 }
 
-
-struct CollectorRegistration {
-    id: &'static str,
-    name: &'static str,
-    requires_sudo: bool,
-    interval: Duration,
-    factory: Box<dyn Fn() -> Box<dyn Collector> + Send + Sync>,
-}
-
-impl CollectorRegistration {
-    fn new(factory: Box<dyn Fn() -> Box<dyn Collector> + Send + Sync>) -> Self {
-        let collector = factory();
-        Self {
-            id: collector.id(),
-            name: collector.name(),
-            requires_sudo: collector.requires_sudo(),
-            interval: collector.interval(),
-            factory,
-        }
-    }
-}
-
 struct CollectorHandle {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
@@ -858,6 +856,10 @@ impl CollectorManager {
 
     fn registrations(&self) -> &[CollectorRegistration] {
         &self.registrations
+    }
+
+    fn collector_count(&self) -> usize {
+        self.registrations.len()
     }
 
     fn collector_ids(&self) -> Vec<&'static str> {
@@ -896,16 +898,12 @@ impl CollectorManager {
             .collect()
     }
 
-    fn collector_notice_rows(&self) -> Vec<Vec<String>> {
-        let mut rows = vec![vec![
-            "Name".to_string(),
-            "ID".to_string(),
-            "Status".to_string(),
-            "Interval".to_string(),
-            "Last update".to_string(),
-        ]];
-        rows.extend(self.collector_rows());
-        rows
+    fn collectors_table(&self) -> TableResult {
+        TableResult {
+            title: "Collectors".to_string(),
+            rows: self.collector_rows(),
+            right_align_last: true,
+        }
     }
 
     fn requires_sudo(&self, id: &str) -> Option<bool> {
@@ -962,5 +960,18 @@ impl CollectorManager {
 
         Ok(())
     }
+}
 
+impl QueryProvider for CollectorManager {
+    fn query(&self, query: Query) -> QueryResult {
+        match (query.kind, query.source) {
+            (crate::data::QueryKind::Table, QuerySource::Collectors) => {
+                QueryResult::Table(self.collectors_table())
+            }
+            _ => QueryResult::Series(crate::data::SeriesResult {
+                title: "Unsupported".to_string(),
+                series: Vec::new(),
+            }),
+        }
+    }
 }

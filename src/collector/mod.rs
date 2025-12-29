@@ -12,7 +12,7 @@ use libc::c_void;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::data::{ParsedInfo, ParsedMetric, SampleData};
+use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue, MAX_SAMPLES};
 
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -58,7 +58,10 @@ pub fn spawn_collector(
             if stop.load(Ordering::Relaxed) {
                 match collector.sample() {
                     Ok(data) => {
-                        let _ = tx.send(CollectorMessage::Sample { collector: id, data });
+                        let _ = tx.send(CollectorMessage::Sample {
+                            collector: id,
+                            data,
+                        });
                     }
                     Err(error) => {
                         let _ = tx.send(CollectorMessage::Error {
@@ -78,7 +81,10 @@ pub fn spawn_collector(
 
             match collector.sample() {
                 Ok(data) => {
-                    let _ = tx.send(CollectorMessage::Sample { collector: id, data });
+                    let _ = tx.send(CollectorMessage::Sample {
+                        collector: id,
+                        data,
+                    });
                 }
                 Err(error) => {
                     let _ = tx.send(CollectorMessage::Error {
@@ -114,8 +120,7 @@ pub fn needs_sudo() -> bool {
 }
 
 pub(crate) fn parse_key_value_lines(text: &str) -> SampleData {
-    let mut metrics = Vec::new();
-    let mut info = Vec::new();
+    let mut entries = Vec::new();
 
     for line in text.lines() {
         let trimmed = line.trim();
@@ -141,21 +146,25 @@ pub(crate) fn parse_key_value_lines(text: &str) -> SampleData {
                 .unwrap_or_default();
             let key = format!("{}|{}", label, unit);
 
-            metrics.push(ParsedMetric {
+            entries.push(ParsedDatum {
                 key,
                 label: label.to_string(),
                 unit,
-                value,
+                retention: Retention::Rolling(MAX_SAMPLES),
+                value: SeriesValue::Number(value),
             });
         } else {
-            info.push(ParsedInfo {
+            entries.push(ParsedDatum {
+                key: label.to_string(),
                 label: label.to_string(),
-                value: rest.to_string(),
+                unit: String::new(),
+                retention: Retention::Latest,
+                value: SeriesValue::Text(rest.to_string()),
             });
         }
     }
 
-    SampleData { metrics, info }
+    SampleData { entries }
 }
 
 pub(crate) fn run_command(command: &str, args: &[&str]) -> Result<String, String> {

@@ -58,7 +58,7 @@ impl Collector for PowermetricsCollector {
         let combined = format!("{stdout}{stderr}");
         let data = parse_key_value_lines(&combined);
 
-        if data.metrics.is_empty() && data.info.is_empty() {
+        if data.entries.is_empty() {
             Err("no metrics parsed from powermetrics output".to_string())
         } else {
             Ok(data)

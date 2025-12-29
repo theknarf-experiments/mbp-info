@@ -1,4 +1,4 @@
-use crate::data::{ParsedInfo, SampleData};
+use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
 use super::{run_command, sysctl_u64, Collector};
 
@@ -24,13 +24,16 @@ impl Collector for MemoryInfoCollector {
     }
 
     fn sample(&mut self) -> Result<SampleData, String> {
-        let mut info = Vec::new();
+        let mut entries = Vec::new();
 
         if let Ok(total) = sysctl_u64("hw.memsize") {
             let gb = total as f64 / (1024.0 * 1024.0 * 1024.0);
-            info.push(ParsedInfo {
+            entries.push(ParsedDatum {
+                key: "Memory Total".to_string(),
                 label: "Memory Total".to_string(),
-                value: format!("{gb:.2} GB"),
+                unit: String::new(),
+                retention: Retention::Latest,
+                value: SeriesValue::Text(format!("{gb:.2} GB")),
             });
         }
 
@@ -41,23 +44,26 @@ impl Collector for MemoryInfoCollector {
             for line in output.lines() {
                 let trimmed = line.trim();
                 if let Some(value) = trimmed.strip_prefix("Speed:") {
-                    info.push(ParsedInfo {
+                    entries.push(ParsedDatum {
+                        key: "Memory Speed".to_string(),
                         label: "Memory Speed".to_string(),
-                        value: value.trim().to_string(),
+                        unit: String::new(),
+                        retention: Retention::Latest,
+                        value: SeriesValue::Text(value.trim().to_string()),
                     });
                 }
                 if let Some(value) = trimmed.strip_prefix("Type:") {
-                    info.push(ParsedInfo {
+                    entries.push(ParsedDatum {
+                        key: "Memory Type".to_string(),
                         label: "Memory Type".to_string(),
-                        value: value.trim().to_string(),
+                        unit: String::new(),
+                        retention: Retention::Latest,
+                        value: SeriesValue::Text(value.trim().to_string()),
                     });
                 }
             }
         }
 
-        Ok(SampleData {
-            metrics: Vec::new(),
-            info,
-        })
+        Ok(SampleData { entries })
     }
 }

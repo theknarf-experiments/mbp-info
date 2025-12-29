@@ -111,8 +111,8 @@ impl InputBindings {
     }
 
     pub fn bind(&mut self, sequence: &str, command: &str) -> Result<(), String> {
-        let canonical = canonical_command(command)
-            .ok_or_else(|| format!("Unknown command: {command}"))?;
+        let canonical =
+            canonical_command(command).ok_or_else(|| format!("Unknown command: {command}"))?;
         if !is_mappable_command(canonical) {
             return Err(format!("Command not mappable: {command}"));
         }
@@ -145,10 +145,6 @@ impl InputBindings {
     }
 
     pub fn mapping_rows(&self) -> Vec<Vec<String>> {
-        if self.map.is_empty() {
-            return vec![vec!["No key mappings.".to_string()]];
-        }
-
         let mut entries: Vec<(String, String)> = self
             .map
             .iter()
@@ -156,10 +152,18 @@ impl InputBindings {
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-        entries
-            .into_iter()
-            .map(|(sequence, command)| vec![sequence, command])
-            .collect()
+        if entries.is_empty() {
+            return vec![vec!["No key mappings.".to_string()]];
+        }
+
+        let mut rows = Vec::with_capacity(entries.len() + 1);
+        rows.push(vec!["Keys".to_string(), "Command".to_string()]);
+        rows.extend(
+            entries
+                .into_iter()
+                .map(|(sequence, command)| vec![sequence, command]),
+        );
+        rows
     }
 
     fn lookup_exact(&self, tokens: &[KeyToken]) -> Option<String> {
@@ -181,16 +185,40 @@ impl InputBindings {
         self.insert_tokens(vec![KeyToken::Down], "cursor_down");
         self.insert_tokens(vec![KeyToken::Char('k')], "cursor_up");
         self.insert_tokens(vec![KeyToken::Up], "cursor_up");
-        self.insert_tokens(vec![KeyToken::Char('g'), KeyToken::Char('g')], "jump_to_first_row");
+        self.insert_tokens(
+            vec![KeyToken::Char('g'), KeyToken::Char('g')],
+            "jump_to_first_row",
+        );
         self.insert_tokens(vec![KeyToken::Char('G')], "jump_to_last_row");
-        self.insert_tokens(vec![KeyToken::Ctrl('w'), KeyToken::Char('h')], "panel_navigate_left");
-        self.insert_tokens(vec![KeyToken::Ctrl('w'), KeyToken::Left], "panel_navigate_left");
-        self.insert_tokens(vec![KeyToken::Ctrl('w'), KeyToken::Char('j')], "panel_navigate_down");
-        self.insert_tokens(vec![KeyToken::Ctrl('w'), KeyToken::Down], "panel_navigate_down");
-        self.insert_tokens(vec![KeyToken::Ctrl('w'), KeyToken::Char('k')], "panel_navigate_up");
+        self.insert_tokens(
+            vec![KeyToken::Ctrl('w'), KeyToken::Char('h')],
+            "panel_navigate_left",
+        );
+        self.insert_tokens(
+            vec![KeyToken::Ctrl('w'), KeyToken::Left],
+            "panel_navigate_left",
+        );
+        self.insert_tokens(
+            vec![KeyToken::Ctrl('w'), KeyToken::Char('j')],
+            "panel_navigate_down",
+        );
+        self.insert_tokens(
+            vec![KeyToken::Ctrl('w'), KeyToken::Down],
+            "panel_navigate_down",
+        );
+        self.insert_tokens(
+            vec![KeyToken::Ctrl('w'), KeyToken::Char('k')],
+            "panel_navigate_up",
+        );
         self.insert_tokens(vec![KeyToken::Ctrl('w'), KeyToken::Up], "panel_navigate_up");
-        self.insert_tokens(vec![KeyToken::Ctrl('w'), KeyToken::Char('l')], "panel_navigate_right");
-        self.insert_tokens(vec![KeyToken::Ctrl('w'), KeyToken::Right], "panel_navigate_right");
+        self.insert_tokens(
+            vec![KeyToken::Ctrl('w'), KeyToken::Char('l')],
+            "panel_navigate_right",
+        );
+        self.insert_tokens(
+            vec![KeyToken::Ctrl('w'), KeyToken::Right],
+            "panel_navigate_right",
+        );
         self.insert_tokens(vec![KeyToken::Ctrl('c')], "quit");
     }
 

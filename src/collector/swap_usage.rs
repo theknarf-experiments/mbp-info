@@ -1,4 +1,4 @@
-use crate::data::{ParsedMetric, SampleData};
+use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue, MAX_SAMPLES};
 
 use super::{bytes_to_mb, Collector};
 
@@ -22,31 +22,31 @@ impl Collector for SwapUsageCollector {
     fn sample(&mut self) -> Result<SampleData, String> {
         let usage = read_swap_usage()?;
 
-        let metrics = vec![
-            ParsedMetric {
+        let entries = vec![
+            ParsedDatum {
                 key: "Swap Used|MB".to_string(),
                 label: "Swap Used".to_string(),
                 unit: "MB".to_string(),
-                value: bytes_to_mb(usage.xsu_used),
+                retention: Retention::Rolling(MAX_SAMPLES),
+                value: SeriesValue::Number(bytes_to_mb(usage.xsu_used)),
             },
-            ParsedMetric {
+            ParsedDatum {
                 key: "Swap Free|MB".to_string(),
                 label: "Swap Free".to_string(),
                 unit: "MB".to_string(),
-                value: bytes_to_mb(usage.xsu_avail),
+                retention: Retention::Rolling(MAX_SAMPLES),
+                value: SeriesValue::Number(bytes_to_mb(usage.xsu_avail)),
             },
-            ParsedMetric {
+            ParsedDatum {
                 key: "Swap Total|MB".to_string(),
                 label: "Swap Total".to_string(),
                 unit: "MB".to_string(),
-                value: bytes_to_mb(usage.xsu_total),
+                retention: Retention::Rolling(MAX_SAMPLES),
+                value: SeriesValue::Number(bytes_to_mb(usage.xsu_total)),
             },
         ];
 
-        Ok(SampleData {
-            metrics,
-            info: Vec::new(),
-        })
+        Ok(SampleData { entries })
     }
 }
 

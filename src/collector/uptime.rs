@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::data::{ParsedMetric, SampleData};
+use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue, MAX_SAMPLES};
 
 use super::{sysctl_timeval, Collector};
 
@@ -31,13 +31,13 @@ impl Collector for UptimeCollector {
         let uptime = now.saturating_sub(boot);
 
         Ok(SampleData {
-            metrics: vec![ParsedMetric {
+            entries: vec![ParsedDatum {
                 key: "Uptime|s".to_string(),
                 label: "Uptime".to_string(),
                 unit: "s".to_string(),
-                value: uptime.as_secs_f64(),
+                retention: Retention::Rolling(MAX_SAMPLES),
+                value: SeriesValue::Number(uptime.as_secs_f64()),
             }],
-            info: Vec::new(),
         })
     }
 }

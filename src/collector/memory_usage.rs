@@ -1,4 +1,4 @@
-use crate::data::{ParsedMetric, SampleData};
+use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue, MAX_SAMPLES};
 
 use super::{bytes_to_mb, Collector};
 
@@ -32,37 +32,38 @@ impl Collector for MemoryUsageCollector {
         let free = (vm_stat.free_count + vm_stat.speculative_count) as u64 * self.page_size;
         let used = active + inactive + wired + compressed;
 
-        let metrics = vec![
-            ParsedMetric {
+        let entries = vec![
+            ParsedDatum {
                 key: "Memory Used|MB".to_string(),
                 label: "Memory Used".to_string(),
                 unit: "MB".to_string(),
-                value: bytes_to_mb(used),
+                retention: Retention::Rolling(MAX_SAMPLES),
+                value: SeriesValue::Number(bytes_to_mb(used)),
             },
-            ParsedMetric {
+            ParsedDatum {
                 key: "Memory Free|MB".to_string(),
                 label: "Memory Free".to_string(),
                 unit: "MB".to_string(),
-                value: bytes_to_mb(free),
+                retention: Retention::Rolling(MAX_SAMPLES),
+                value: SeriesValue::Number(bytes_to_mb(free)),
             },
-            ParsedMetric {
+            ParsedDatum {
                 key: "Memory Wired|MB".to_string(),
                 label: "Memory Wired".to_string(),
                 unit: "MB".to_string(),
-                value: bytes_to_mb(wired),
+                retention: Retention::Rolling(MAX_SAMPLES),
+                value: SeriesValue::Number(bytes_to_mb(wired)),
             },
-            ParsedMetric {
+            ParsedDatum {
                 key: "Memory Compressed|MB".to_string(),
                 label: "Memory Compressed".to_string(),
                 unit: "MB".to_string(),
-                value: bytes_to_mb(compressed),
+                retention: Retention::Rolling(MAX_SAMPLES),
+                value: SeriesValue::Number(bytes_to_mb(compressed)),
             },
         ];
 
-        Ok(SampleData {
-            metrics,
-            info: Vec::new(),
-        })
+        Ok(SampleData { entries })
     }
 }
 
