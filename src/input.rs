@@ -209,9 +209,9 @@ impl InputBindings {
     }
 
     fn has_prefix_longer(&self, tokens: &[KeyToken]) -> bool {
-        self.map
-            .keys()
-            .any(|mapped| mapped.len() > tokens.len() && is_prefix_with_leader(tokens, mapped, self.leader))
+        self.map.keys().any(|mapped| {
+            mapped.len() > tokens.len() && is_prefix_with_leader(tokens, mapped, self.leader)
+        })
     }
 
     fn load_defaults(&mut self) {
@@ -255,8 +255,14 @@ impl InputBindings {
         );
         self.insert_tokens(vec![KeyToken::Ctrl('c')], "quit");
 
-        self.insert_tokens(vec![KeyToken::Leader, KeyToken::Char('n')], "dashboard_next");
-        self.insert_tokens(vec![KeyToken::Leader, KeyToken::Char('p')], "dashboard_prev");
+        self.insert_tokens(
+            vec![KeyToken::Leader, KeyToken::Char('n')],
+            "dashboard_next",
+        );
+        self.insert_tokens(
+            vec![KeyToken::Leader, KeyToken::Char('p')],
+            "dashboard_prev",
+        );
         self.insert_tokens(vec![KeyToken::Leader, KeyToken::Char('c')], "dashboard_new");
         self.insert_tokens(vec![KeyToken::Leader, KeyToken::Char('h')], "help");
         self.insert_tokens(vec![KeyToken::Leader, KeyToken::Char('q')], "quit");
@@ -279,7 +285,7 @@ pub fn parse_key_sequence(input: &str) -> Result<Vec<KeyToken>, String> {
         if ch == '<' {
             let mut token = String::new();
             let mut closed = false;
-            while let Some(next) = chars.next() {
+            for next in chars.by_ref() {
                 if next == '>' {
                     closed = true;
                     break;
@@ -346,11 +352,7 @@ fn key_event_to_token(event: KeyEvent) -> Option<KeyToken> {
     }
 }
 
-fn is_prefix_with_leader(
-    prefix: &[KeyToken],
-    sequence: &[KeyToken],
-    leader: Option<char>,
-) -> bool {
+fn is_prefix_with_leader(prefix: &[KeyToken], sequence: &[KeyToken], leader: Option<char>) -> bool {
     if sequence.len() < prefix.len() {
         return false;
     }

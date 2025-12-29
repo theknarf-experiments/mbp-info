@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -5,9 +6,10 @@ use std::sync::{
     Arc,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
+use crate::data::{CollectorRegistration, ParsedDatum, Retention, SampleData, SeriesValue};
+use crate::query::{Query, QueryProvider, QueryResult, QueryRow, QuerySource};
 
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 pub const MAX_SAMPLES: usize = 120;
@@ -232,3 +234,176 @@ pub(crate) fn bytes_to_mb(value: u64) -> f64 {
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+
+struct CollectorHandle {
+    stop: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+pub struct CollectorManager {
+    registrations: Vec<CollectorRegistration>,
+    running: HashMap<&'static str, CollectorHandle>,
+    last_sample: HashMap<&'static str, Instant>,
+    tx: Sender<CollectorMessage>,
+}
+
+impl CollectorManager {
+    pub fn new(registrations: Vec<CollectorRegistration>, tx: Sender<CollectorMessage>) -> Self {
+        Self {
+            registrations,
+            running: HashMap::new(),
+            last_sample: HashMap::new(),
+            tx,
+        }
+    }
+
+    pub fn collector_count(&self) -> usize {
+        self.registrations.len()
+    }
+
+    pub fn collector_ids(&self) -> Vec<&'static str> {
+        self.registrations.iter().map(|reg| reg.id).collect()
+    }
+
+    fn collector_rows(&self) -> Vec<QueryRow> {
+        let now = Instant::now();
+        self.registrations
+            .iter()
+            .map(|reg| {
+                let status = if self.running.contains_key(reg.id) {
+                    "on"
+                } else {
+                    "off"
+                };
+                let status = if reg.requires_sudo {
+                    format!("{status} (sudo)")
+                } else {
+                    status.to_string()
+                };
+                let interval = format!("{}s", reg.interval.as_secs());
+                let last_update = self
+                    .last_sample
+                    .get(reg.id)
+                    .map(|instant| format!("{}s ago", now.duration_since(*instant).as_secs()))
+                    .unwrap_or_else(|| "-".to_string());
+                QueryRow {
+                    cells: vec![
+                        vec![SeriesValue::Text(reg.name.to_string())],
+                        vec![SeriesValue::Text(reg.id.to_string())],
+                        vec![SeriesValue::Text(status)],
+                        vec![SeriesValue::Text(interval)],
+                        vec![SeriesValue::Text(last_update)],
+                    ],
+                    series_label: None,
+                    series_unit: None,
+                    sample_count: None,
+                }
+            })
+            .collect()
+    }
+
+    fn collectors_query(&self) -> QueryResult {
+        QueryResult {
+            title: "Collectors".to_string(),
+            columns: vec![
+                "Collector".to_string(),
+                "ID".to_string(),
+                "Status".to_string(),
+                "Interval".to_string(),
+                "Last update".to_string(),
+            ],
+            rows: self.collector_rows(),
+            series_column: None,
+        }
+    }
+
+    pub fn requires_sudo(&self, id: &str) -> Option<bool> {
+        self.registrations
+            .iter()
+            .find(|reg| reg.id == id)
+            .map(|reg| reg.requires_sudo)
+    }
+
+    pub fn is_enabled(&self, id: &str) -> bool {
+        self.running.contains_key(id)
+    }
+
+    pub fn record_sample(&mut self, id: &'static str) {
+        self.last_sample.insert(id, Instant::now());
+    }
+
+    pub fn enable(&mut self, id: &str) -> Result<(), String> {
+        if self.running.contains_key(id) {
+            return Err(format!("Collector '{id}' already enabled."));
+        }
+
+        let reg = self
+            .registrations
+            .iter()
+            .find(|reg| reg.id == id)
+            .ok_or_else(|| format!("Unknown collector: {id}"))?;
+
+        let collector = (reg.factory)();
+        let stop = Arc::new(AtomicBool::new(true));
+        let handle = spawn_collector(collector, self.tx.clone(), stop.clone());
+
+        self.running.insert(
+            reg.id,
+            CollectorHandle {
+                stop,
+                join: Some(handle),
+            },
+        );
+
+        Ok(())
+    }
+
+    pub fn disable(&mut self, id: &str) -> Result<(), String> {
+        let mut handle = self
+            .running
+            .remove(id)
+            .ok_or_else(|| format!("Collector '{id}' is not enabled."))?;
+
+        handle.stop.store(false, Ordering::Relaxed);
+        if let Some(join) = handle.join.take() {
+            let _ = join.join();
+        }
+
+        Ok(())
+    }
+
+    pub fn start_defaults(&mut self, use_sudo: bool, sudo_ready: bool) -> Option<String> {
+        let mut message = None;
+
+        let registrations: Vec<(&'static str, bool)> = self
+            .registrations
+            .iter()
+            .map(|registration| (registration.id, registration.requires_sudo))
+            .collect();
+
+        for (id, requires_sudo) in registrations {
+            if requires_sudo && use_sudo && !sudo_ready {
+                continue;
+            }
+            if let Err(error) = self.enable(id) {
+                message = Some(format!("Failed to start {id}: {error}"));
+            }
+        }
+
+        message
+    }
+}
+
+impl QueryProvider for CollectorManager {
+    fn query(&self, query: Query) -> QueryResult {
+        match query.source {
+            QuerySource::Collectors => self.collectors_query(),
+            _ => QueryResult {
+                title: "Unsupported".to_string(),
+                columns: Vec::new(),
+                rows: Vec::new(),
+                series_column: None,
+            },
+        }
+    }
+}

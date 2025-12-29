@@ -351,11 +351,10 @@ impl AppState {
     }
 
     pub fn set_notice(&mut self, title: &str, rows: Vec<Vec<String>>, is_error: bool) {
-        let selected = if rows.is_empty() { 0 } else { 0 };
         self.notice = Some(Notice {
             title: title.to_string(),
             rows,
-            selected,
+            selected: 0,
             is_error,
             on_enter: None,
         });
@@ -368,11 +367,10 @@ impl AppState {
         is_error: bool,
         on_enter: NoticeAction,
     ) {
-        let selected = if rows.is_empty() { 0 } else { 0 };
         self.notice = Some(Notice {
             title: title.to_string(),
             rows,
-            selected,
+            selected: 0,
             is_error,
             on_enter: Some(on_enter),
         });
@@ -407,7 +405,7 @@ impl AppState {
     pub fn notice_selected_command(&self) -> Option<String> {
         let notice = self.notice.as_ref()?;
         let row = notice.rows.get(notice.selected)?;
-        let raw = row.get(0)?.trim();
+        let raw = row.first()?.trim();
         if raw.is_empty() {
             return None;
         }
@@ -492,8 +490,7 @@ impl AppState {
         completion.index = (completion.index + 1) % completion.candidates.len();
         Some(format!(
             "{}{}",
-            completion.base,
-            completion.candidates[completion.index]
+            completion.base, completion.candidates[completion.index]
         ))
     }
 
@@ -509,8 +506,7 @@ impl AppState {
         }
         Some(format!(
             "{}{}",
-            completion.base,
-            completion.candidates[completion.index]
+            completion.base, completion.candidates[completion.index]
         ))
     }
 
@@ -555,7 +551,13 @@ pub fn draw_ui(
                 app.focus() == FocusPanel::Chart,
                 areas.chart,
             );
-            draw_info_panel(frame, data, app, app.focus() == FocusPanel::Info, areas.info);
+            draw_info_panel(
+                frame,
+                data,
+                app,
+                app.focus() == FocusPanel::Info,
+                areas.info,
+            );
             draw_collectors_panel(
                 frame,
                 collectors,
@@ -638,7 +640,11 @@ pub(crate) struct PanelAreas {
 pub(crate) fn panel_areas(size: Rect) -> PanelAreas {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(size);
     let dashboard = chunks[0];
     let body = chunks[1];
@@ -692,7 +698,12 @@ pub(crate) fn panel_areas(size: Rect) -> PanelAreas {
     }
 }
 
-pub(crate) fn panel_at(size: Rect, x: u16, y: u16, dashboard_type: DashboardType) -> Option<FocusPanel> {
+pub(crate) fn panel_at(
+    size: Rect,
+    x: u16,
+    y: u16,
+    dashboard_type: DashboardType,
+) -> Option<FocusPanel> {
     if matches!(dashboard_type, DashboardType::BlankType) {
         return None;
     }
@@ -1064,7 +1075,6 @@ impl TuiTable {
         self.border_style = style;
         self
     }
-
 }
 
 fn draw_tui_table(frame: &mut Frame, table: &TuiTable, area: Rect) {
@@ -1114,7 +1124,7 @@ fn draw_notice_popup(
     frame: &mut Frame,
     size: Rect,
     title: &str,
-    rows: &Vec<Vec<String>>,
+    rows: &[Vec<String>],
     selected: usize,
     is_error: bool,
 ) {
@@ -1140,7 +1150,7 @@ fn draw_notice_popup(
 
     frame.render_widget(Clear, popup_area);
 
-    let mut temp_rows = rows.clone();
+    let mut temp_rows = rows.to_vec();
     if temp_rows.is_empty() {
         temp_rows.push(vec!["No output.".to_string()]);
     }
@@ -1209,7 +1219,7 @@ fn chart_series_from_row(row: &QueryRow, series_column: usize) -> Option<ChartSe
     let label = row
         .series_label
         .clone()
-        .or_else(|| row.cells.first().and_then(cell_label))
+        .or_else(|| row.cells.first().and_then(|cell| cell_label(cell)))
         .unwrap_or_else(|| "Series".to_string());
     let unit = row.series_unit.clone().unwrap_or_default();
 
@@ -1313,7 +1323,7 @@ fn rows_from_text(text: &str) -> Vec<Vec<String>> {
     text.lines().map(|line| vec![line.to_string()]).collect()
 }
 
-pub(crate) fn rows_from_query(result: &QueryResult) -> Vec<Vec<String>> {
+pub fn rows_from_query(result: &QueryResult) -> Vec<Vec<String>> {
     result
         .rows
         .iter()
@@ -1401,7 +1411,7 @@ fn format_number(value: f64) -> String {
         .to_string()
 }
 
-fn cell_label(cell: &Vec<SeriesValue>) -> Option<String> {
+fn cell_label(cell: &[SeriesValue]) -> Option<String> {
     cell.last().map(|value| match value {
         SeriesValue::Number(value) => format_number(*value),
         SeriesValue::Text(value) => value.clone(),
@@ -1410,4 +1420,70 @@ fn cell_label(cell: &Vec<SeriesValue>) -> Option<String> {
 
 fn format_value(value: f64) -> String {
     format_number(value)
+}
+
+pub enum PanelMove {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+pub fn panel_navigate(
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    app: &mut AppState,
+    direction: PanelMove,
+) -> std::io::Result<bool> {
+    let size = terminal.size()?;
+    let is_wide = size.width >= 90;
+
+    if is_wide {
+        match direction {
+            PanelMove::Left => match app.focus() {
+                FocusPanel::Chart => app.set_focus(FocusPanel::Metrics),
+                FocusPanel::Info => app.set_focus(FocusPanel::Collectors),
+                _ => {}
+            },
+            PanelMove::Right => match app.focus() {
+                FocusPanel::Metrics => app.set_focus(FocusPanel::Chart),
+                FocusPanel::Collectors => app.set_focus(FocusPanel::Info),
+                _ => {}
+            },
+            PanelMove::Up => match app.focus() {
+                FocusPanel::Collectors => app.set_focus(FocusPanel::Metrics),
+                FocusPanel::Info => app.set_focus(FocusPanel::Chart),
+                _ => {}
+            },
+            PanelMove::Down => match app.focus() {
+                FocusPanel::Metrics => app.set_focus(FocusPanel::Collectors),
+                FocusPanel::Chart => app.set_focus(FocusPanel::Info),
+                _ => {}
+            },
+        }
+        return Ok(false);
+    }
+
+    match direction {
+        PanelMove::Up | PanelMove::Down => {
+            let order = [
+                FocusPanel::Metrics,
+                FocusPanel::Chart,
+                FocusPanel::Info,
+                FocusPanel::Collectors,
+            ];
+            let current = order
+                .iter()
+                .position(|item| *item == app.focus())
+                .unwrap_or(0);
+            let next = if matches!(direction, PanelMove::Up) {
+                current.saturating_sub(1)
+            } else {
+                (current + 1).min(order.len() - 1)
+            };
+            app.set_focus(order[next]);
+        }
+        PanelMove::Left | PanelMove::Right => {}
+    }
+
+    Ok(false)
 }
