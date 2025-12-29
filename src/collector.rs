@@ -10,6 +10,7 @@ use regex::Regex;
 use crate::data::{ParsedInfo, ParsedMetric, SampleData};
 
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+pub const COLLECTORS: &[&str] = &["powermetrics"];
 
 static NUMERIC_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^\s*(-?\d+(?:\.\d+)?)(?:\s*([A-Za-z/%]+))?\s*$")

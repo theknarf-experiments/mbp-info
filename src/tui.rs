@@ -28,15 +28,36 @@ static GROUP_RULES: &[(&str, &[&str])] = &[
 pub struct AppState {
     selected: usize,
     error: Option<String>,
-    use_sudo: bool,
+    message: Option<String>,
+    focus: FocusPanel,
+    command_mode: bool,
+    command_buffer: String,
+    focus_pending: bool,
+    command_history: Vec<String>,
+    history_index: Option<usize>,
+    history_draft: Option<String>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FocusPanel {
+    Metrics,
+    Chart,
+    Info,
 }
 
 impl AppState {
-    pub fn new(use_sudo: bool) -> Self {
+    pub fn new() -> Self {
         Self {
             selected: 0,
             error: None,
-            use_sudo,
+            message: None,
+            focus: FocusPanel::Metrics,
+            command_mode: false,
+            command_buffer: String::new(),
+            focus_pending: false,
+            command_history: Vec::new(),
+            history_index: None,
+            history_draft: None,
         }
     }
 
@@ -68,17 +89,139 @@ impl AppState {
         data.metric_key(self.selected)
     }
 
+    pub fn is_command_mode(&self) -> bool {
+        self.command_mode
+    }
+
+    pub fn enter_command_mode(&mut self) {
+        self.command_mode = true;
+        self.command_buffer.clear();
+        self.history_index = None;
+        self.history_draft = None;
+    }
+
+    pub fn exit_command_mode(&mut self) {
+        self.command_mode = false;
+        self.command_buffer.clear();
+        self.history_index = None;
+        self.history_draft = None;
+    }
+
+    pub fn push_command_char(&mut self, ch: char) {
+        self.clear_history_navigation();
+        self.command_buffer.push(ch);
+    }
+
+    pub fn pop_command_char(&mut self) {
+        self.clear_history_navigation();
+        self.command_buffer.pop();
+    }
+
+    pub fn take_command(&mut self) -> String {
+        let command = self.command_buffer.trim().to_string();
+        self.command_buffer.clear();
+        self.history_index = None;
+        self.history_draft = None;
+        command
+    }
+
+    pub fn command_buffer(&self) -> &str {
+        &self.command_buffer
+    }
+
+    pub fn set_command_buffer(&mut self, value: String) {
+        self.command_buffer = value;
+    }
+
+    pub fn record_command(&mut self, command: &str) {
+        if !command.is_empty() {
+            self.command_history.push(command.to_string());
+        }
+        self.history_index = None;
+        self.history_draft = None;
+    }
+
+    pub fn history_prev(&mut self) {
+        if self.command_history.is_empty() {
+            return;
+        }
+
+        let next_index = match self.history_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.history_draft = Some(self.command_buffer.clone());
+                self.command_history.len().saturating_sub(1)
+            }
+        };
+
+        self.history_index = Some(next_index);
+        if let Some(command) = self.command_history.get(next_index) {
+            self.command_buffer = command.clone();
+        }
+    }
+
+    pub fn history_next(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+
+        if index + 1 < self.command_history.len() {
+            let next_index = index + 1;
+            self.history_index = Some(next_index);
+            if let Some(command) = self.command_history.get(next_index) {
+                self.command_buffer = command.clone();
+            }
+        } else {
+            self.history_index = None;
+            self.command_buffer = self.history_draft.take().unwrap_or_default();
+        }
+    }
+
+    pub fn focus(&self) -> FocusPanel {
+        self.focus
+    }
+
+    pub fn set_focus(&mut self, focus: FocusPanel) {
+        self.focus = focus;
+    }
+
+    pub fn focus_pending(&self) -> bool {
+        self.focus_pending
+    }
+
+    pub fn set_focus_pending(&mut self, pending: bool) {
+        self.focus_pending = pending;
+    }
+
     pub fn set_error(&mut self, error: Option<String>) {
         self.error = error;
+        if self.error.is_some() {
+            self.message = None;
+        }
     }
 
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 
-    pub fn use_sudo(&self) -> bool {
-        self.use_sudo
+    pub fn set_message(&mut self, message: Option<String>) {
+        self.message = message;
+        if self.message.is_some() {
+            self.error = None;
+        }
     }
+
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
+    fn clear_history_navigation(&mut self) {
+        if self.history_index.is_some() {
+            self.history_index = None;
+            self.history_draft = None;
+        }
+    }
+
 }
 
 pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
@@ -89,14 +232,11 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
             Constraint::Length(3),
             Constraint::Min(0),
             Constraint::Length(2),
+            Constraint::Length(1),
         ])
         .split(size);
 
-    let controls = if app.use_sudo() {
-        "Up/Down to select a metric | a to authenticate | q to quit"
-    } else {
-        "Up/Down to select a metric | q to quit"
-    };
+    let controls = "Arrows/jk to select | : for commands | Ctrl+w then hjkl/arrow to focus";
     let header = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("mbp-info", Style::default().fg(Color::Cyan)),
@@ -116,9 +256,26 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
             ])
             .split(chunks[1]);
 
-        draw_metrics_list(frame, data, app, body_chunks[0]);
-        draw_chart(frame, data, app, body_chunks[1]);
-        draw_info_panel(frame, data, body_chunks[2]);
+        draw_metrics_list(
+            frame,
+            data,
+            app,
+            app.focus() == FocusPanel::Metrics,
+            body_chunks[0],
+        );
+        draw_chart(
+            frame,
+            data,
+            app,
+            app.focus() == FocusPanel::Chart,
+            body_chunks[1],
+        );
+        draw_info_panel(
+            frame,
+            data,
+            app.focus() == FocusPanel::Info,
+            body_chunks[2],
+        );
     } else {
         let body_chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -130,17 +287,43 @@ pub fn draw_ui(frame: &mut Frame, data: &DataStore, app: &AppState) {
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
             .split(body_chunks[1]);
 
-        draw_metrics_list(frame, data, app, body_chunks[0]);
-        draw_chart(frame, data, app, right_chunks[0]);
-        draw_info_panel(frame, data, right_chunks[1]);
+        draw_metrics_list(
+            frame,
+            data,
+            app,
+            app.focus() == FocusPanel::Metrics,
+            body_chunks[0],
+        );
+        draw_chart(
+            frame,
+            data,
+            app,
+            app.focus() == FocusPanel::Chart,
+            right_chunks[0],
+        );
+        draw_info_panel(
+            frame,
+            data,
+            app.focus() == FocusPanel::Info,
+            right_chunks[1],
+        );
     }
 
     let status = build_status_line(data, app);
-    let footer = Paragraph::new(Line::from(status)).block(Block::default().borders(Borders::TOP));
+    let footer =
+        Paragraph::new(Line::from(status)).block(Block::default().borders(Borders::TOP));
     frame.render_widget(footer, chunks[2]);
+
+    draw_command_bar(frame, app, chunks[3]);
 }
 
-fn draw_metrics_list(frame: &mut Frame, data: &DataStore, app: &AppState, area: Rect) {
+fn draw_metrics_list(
+    frame: &mut Frame,
+    data: &DataStore,
+    app: &AppState,
+    focused: bool,
+    area: Rect,
+) {
     let entries: Vec<&MetricSeries> = data
         .metric_order()
         .iter()
@@ -188,8 +371,12 @@ fn draw_metrics_list(frame: &mut Frame, data: &DataStore, app: &AppState, area: 
         state.select(Some(selected.saturating_sub(start)));
     }
 
+    let mut block = Block::default().title("Metrics").borders(Borders::ALL);
+    if focused {
+        block = block.border_style(Style::default().fg(Color::Cyan));
+    }
     let list = List::new(items)
-        .block(Block::default().title("Metrics").borders(Borders::ALL))
+        .block(block)
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
@@ -201,18 +388,30 @@ fn draw_metrics_list(frame: &mut Frame, data: &DataStore, app: &AppState, area: 
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, area: Rect) {
+fn draw_chart(
+    frame: &mut Frame,
+    data: &DataStore,
+    app: &AppState,
+    focused: bool,
+    area: Rect,
+) {
     let Some(selected_key) = app.selected_key(data) else {
-        let empty = Paragraph::new("Waiting for powermetrics samples...")
-            .block(Block::default().title("Chart").borders(Borders::ALL));
+        let mut block = Block::default().title("Chart").borders(Borders::ALL);
+        if focused {
+            block = block.border_style(Style::default().fg(Color::Cyan));
+        }
+        let empty = Paragraph::new("Waiting for powermetrics samples...").block(block);
         frame.render_widget(empty, area);
         return;
     };
 
     let (title, group_series) = group_series_for_selected(data, selected_key);
     if group_series.is_empty() || group_series.iter().all(|series| series.values.is_empty()) {
-        let empty = Paragraph::new("No data yet for selected metric.")
-            .block(Block::default().title("Chart").borders(Borders::ALL));
+        let mut block = Block::default().title("Chart").borders(Borders::ALL);
+        if focused {
+            block = block.border_style(Style::default().fg(Color::Cyan));
+        }
+        let empty = Paragraph::new("No data yet for selected metric.").block(block);
         frame.render_widget(empty, area);
         return;
     }
@@ -273,8 +472,12 @@ fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, area: Rect) {
         })
         .collect();
 
+    let mut block = Block::default().title(title).borders(Borders::ALL);
+    if focused {
+        block = block.border_style(Style::default().fg(Color::Cyan));
+    }
     let chart = Chart::new(datasets)
-        .block(Block::default().title(title).borders(Borders::ALL))
+        .block(block)
         .x_axis(
             Axis::default()
                 .title("time")
@@ -295,7 +498,7 @@ fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, area: Rect) {
     frame.render_widget(chart, area);
 }
 
-fn draw_info_panel(frame: &mut Frame, data: &DataStore, area: Rect) {
+fn draw_info_panel(frame: &mut Frame, data: &DataStore, focused: bool, area: Rect) {
     let max_lines = area.height.saturating_sub(2) as usize;
     let mut lines = Vec::new();
 
@@ -312,15 +515,33 @@ fn draw_info_panel(frame: &mut Frame, data: &DataStore, area: Rect) {
         lines.push(Line::from("No static info yet."));
     }
 
+    let mut block = Block::default().title("Static Info").borders(Borders::ALL);
+    if focused {
+        block = block.border_style(Style::default().fg(Color::Cyan));
+    }
     let panel = Paragraph::new(lines)
-        .block(Block::default().title("Static Info").borders(Borders::ALL))
+        .block(block)
         .wrap(Wrap { trim: true });
     frame.render_widget(panel, area);
+}
+
+fn draw_command_bar(frame: &mut Frame, app: &AppState, area: Rect) {
+    let content = if app.is_command_mode() {
+        format!(":{}", app.command_buffer())
+    } else {
+        String::new()
+    };
+    let command = Paragraph::new(Line::from(content));
+    frame.render_widget(command, area);
 }
 
 fn build_status_line(data: &DataStore, app: &AppState) -> String {
     if let Some(error) = app.error() {
         return format!("Error: {error}");
+    }
+
+    if let Some(message) = app.message() {
+        return message.to_string();
     }
 
     if data.sample_count() == 0 {
@@ -331,11 +552,17 @@ fn build_status_line(data: &DataStore, app: &AppState) -> String {
         .last_sample()
         .map(|instant| instant.elapsed().as_secs())
         .unwrap_or(0);
+    let focus = match app.focus() {
+        FocusPanel::Metrics => "Metrics",
+        FocusPanel::Chart => "Chart",
+        FocusPanel::Info => "Info",
+    };
     format!(
-        "Samples: {} | Interval: {}s | Last update: {}s ago",
+        "Samples: {} | Interval: {}s | Last update: {}s ago | Focus: {}",
         data.sample_count(),
         SAMPLE_INTERVAL.as_secs(),
-        age
+        age,
+        focus
     )
 }
 
