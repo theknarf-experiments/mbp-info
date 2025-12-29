@@ -27,10 +27,10 @@ use crate::collector::{
     GpuInfoCollector, MemoryInfoCollector, MemoryUsageCollector, OsVersionCollector,
     PowermetricsCollector, SwapUsageCollector, UptimeCollector,
 };
-use crate::data::{CollectorRegistration, DataStore};
+use crate::data::{CollectorRegistration, DataStore, SeriesValue};
 use crate::input::InputBindings;
-use crate::query::{Query, QueryKind, QueryProvider, QueryResult, QuerySource, TableResult};
-use crate::tui::{draw_ui, AppState, FocusPanel};
+use crate::query::{Query, QueryProvider, QueryResult, QueryRow, QuerySource, SeriesMode};
+use crate::tui::{draw_ui, rows_from_query, AppState, FocusPanel};
 
 const COLLECTOR_ACTIONS: [&str; 2] = ["on", "off"];
 
@@ -499,15 +499,14 @@ fn execute_named_command(
             Ok(false)
         }
         "collectors" => {
-            match manager.query(Query::collectors_table(app.collectors_selected())) {
-                QueryResult::Table(table) => {
-                    let TableResult { title, rows, .. } = table;
-                    app.set_notice(&title, rows, false);
-                }
-                QueryResult::Series(_) => {
-                    app.set_error(Some("Collectors query did not return a table.".to_string()));
-                }
-            }
+            let query = Query {
+                source: QuerySource::Collectors,
+                selected_index: Some(app.collectors_selected()),
+                mode: SeriesMode::Latest,
+            };
+            let result = manager.query(query);
+            let rows = rows_from_query(&result);
+            app.set_notice(&result.title, rows, false);
             Ok(false)
         }
         "maps" => {
@@ -866,7 +865,7 @@ impl CollectorManager {
         self.registrations.iter().map(|reg| reg.id).collect()
     }
 
-    fn collector_rows(&self) -> Vec<Vec<String>> {
+    fn collector_rows(&self) -> Vec<QueryRow> {
         let now = Instant::now();
         self.registrations
             .iter()
@@ -887,22 +886,34 @@ impl CollectorManager {
                     .get(reg.id)
                     .map(|instant| format!("{}s ago", now.duration_since(*instant).as_secs()))
                     .unwrap_or_else(|| "-".to_string());
-                vec![
-                    reg.name.to_string(),
-                    reg.id.to_string(),
-                    status,
-                    interval,
-                    last_update,
-                ]
+                QueryRow {
+                    cells: vec![
+                        vec![SeriesValue::Text(reg.name.to_string())],
+                        vec![SeriesValue::Text(reg.id.to_string())],
+                        vec![SeriesValue::Text(status)],
+                        vec![SeriesValue::Text(interval)],
+                        vec![SeriesValue::Text(last_update)],
+                    ],
+                    series_label: None,
+                    series_unit: None,
+                    sample_count: None,
+                }
             })
             .collect()
     }
 
-    fn collectors_table(&self) -> TableResult {
-        TableResult {
+    fn collectors_query(&self) -> QueryResult {
+        QueryResult {
             title: "Collectors".to_string(),
+            columns: vec![
+                "Collector".to_string(),
+                "ID".to_string(),
+                "Status".to_string(),
+                "Interval".to_string(),
+                "Last update".to_string(),
+            ],
             rows: self.collector_rows(),
-            right_align_last: true,
+            series_column: None,
         }
     }
 
@@ -964,14 +975,14 @@ impl CollectorManager {
 
 impl QueryProvider for CollectorManager {
     fn query(&self, query: Query) -> QueryResult {
-        match (query.kind, query.source) {
-            (QueryKind::Table, QuerySource::Collectors) => {
-                QueryResult::Table(self.collectors_table())
-            }
-            _ => QueryResult::Series(crate::query::SeriesResult {
+        match query.source {
+            QuerySource::Collectors => self.collectors_query(),
+            _ => QueryResult {
                 title: "Unsupported".to_string(),
-                series: Vec::new(),
-            }),
+                columns: Vec::new(),
+                rows: Vec::new(),
+                series_column: None,
+            },
         }
     }
 }

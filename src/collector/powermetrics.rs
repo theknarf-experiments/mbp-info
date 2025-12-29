@@ -56,7 +56,15 @@ impl Collector for PowermetricsCollector {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         let combined = format!("{stdout}{stderr}");
-        let data = parse_key_value_lines(&combined);
+        let filtered = combined
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start().trim_start_matches('*').trim_start();
+                !trimmed.starts_with("Sampled system activity")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let data = parse_key_value_lines(&filtered);
 
         if data.entries.is_empty() {
             Err("no metrics parsed from powermetrics output".to_string())

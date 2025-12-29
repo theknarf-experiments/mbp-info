@@ -9,17 +9,10 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use libc::c_void;
-use once_cell::sync::Lazy;
-use regex::Regex;
-
 use crate::data::{ParsedDatum, Retention, SampleData, SeriesValue};
 
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 pub const MAX_SAMPLES: usize = 120;
-
-static NUMERIC_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\s*(-?\d+(?:\.\d+)?)(?:\s*([A-Za-z/%]+))?\s*$").expect("valid regex")
-});
 
 pub trait Collector: Send {
     fn id(&self) -> &'static str;
@@ -136,15 +129,7 @@ pub(crate) fn parse_key_value_lines(text: &str) -> SampleData {
             continue;
         }
 
-        if let Some(caps) = NUMERIC_RE.captures(rest) {
-            let value: f64 = match caps.get(1).map(|m| m.as_str().parse()) {
-                Some(Ok(value)) => value,
-                _ => continue,
-            };
-            let unit = caps
-                .get(2)
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default();
+        if let Some((value, unit)) = parse_numeric_value(rest) {
             let key = format!("{}|{}", label, unit);
 
             entries.push(ParsedDatum {
@@ -166,6 +151,62 @@ pub(crate) fn parse_key_value_lines(text: &str) -> SampleData {
     }
 
     SampleData { entries }
+}
+
+fn parse_numeric_value(input: &str) -> Option<(f64, String)> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut number = String::new();
+    let mut seen_digit = false;
+    let mut seen_dot = false;
+    let mut seen_sign = false;
+    let mut chars = trimmed.chars().peekable();
+
+    while let Some(&ch) = chars.peek() {
+        let is_sign = (ch == '-' || ch == '+') && !seen_sign && !seen_digit;
+        let is_digit = ch.is_ascii_digit();
+        let is_dot = ch == '.' && !seen_dot;
+
+        if is_sign {
+            seen_sign = true;
+            number.push(ch);
+            chars.next();
+            continue;
+        }
+
+        if is_digit {
+            seen_digit = true;
+            number.push(ch);
+            chars.next();
+            continue;
+        }
+
+        if is_dot {
+            seen_dot = true;
+            number.push(ch);
+            chars.next();
+            continue;
+        }
+
+        break;
+    }
+
+    if !seen_digit {
+        return None;
+    }
+
+    let value = number.parse::<f64>().ok()?;
+    let unit_raw: String = chars.collect::<String>();
+    let unit = unit_raw
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphabetic() || *ch == '/' || *ch == '%')
+        .collect::<String>();
+
+    Some((value, unit))
 }
 
 pub(crate) fn run_command(command: &str, args: &[&str]) -> Result<String, String> {

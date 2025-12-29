@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use crate::collector::Collector;
+use crate::query::{Query, QueryResult, QueryRow, QuerySource, SeriesMode};
 
 #[derive(Clone, Debug)]
 pub enum Retention {
@@ -151,28 +152,105 @@ impl DataStore {
         let metrics = self.metric_series();
         metrics.get(index).copied()
     }
-}
 
-impl DataSeries {
-    pub fn display_value(&self) -> String {
-        match self.values.back() {
-            Some(SeriesValue::Number(value)) => {
-                if self.unit.is_empty() {
-                    format_number(*value)
+    pub fn query(&self, query: Query) -> QueryResult {
+        match query.source {
+            QuerySource::Metrics => self.metrics_query(query.selected_index, query.mode),
+            QuerySource::StaticInfo => self.static_info_query(query.mode),
+            QuerySource::Collectors => QueryResult {
+                title: "Collectors".to_string(),
+                columns: Vec::new(),
+                rows: Vec::new(),
+                series_column: None,
+            },
+        }
+    }
+
+    fn metrics_query(&self, selected_index: Option<usize>, mode: SeriesMode) -> QueryResult {
+        let entries = self.metric_series();
+        let selected_entries: Vec<&DataSeries> = match mode {
+            SeriesMode::Latest => entries,
+            SeriesMode::Full => {
+                if let Some(index) = selected_index {
+                    entries.get(index).copied().into_iter().collect()
                 } else {
-                    format!("{} {}", format_number(*value), self.unit)
+                    entries
                 }
             }
-            Some(SeriesValue::Text(value)) => value.clone(),
-            None => "-".to_string(),
+        };
+
+        let rows = selected_entries
+            .iter()
+            .map(|series| QueryRow {
+                cells: vec![
+                    vec![SeriesValue::Text(series.label.clone())],
+                    series_values(series, mode),
+                    vec![SeriesValue::Number(series.sample_count as f64)],
+                ],
+                series_label: Some(series.label.clone()),
+                series_unit: Some(series.unit.clone()),
+                sample_count: Some(series.sample_count),
+            })
+            .collect();
+
+        let title = match mode {
+            SeriesMode::Latest => "Metrics".to_string(),
+            SeriesMode::Full => {
+                if let Some(index) = selected_index {
+                    if let Some(selected) = self.metric_series_at(index) {
+                        if selected.unit.is_empty() {
+                            selected.label.clone()
+                        } else {
+                            format!("{} ({})", selected.label, selected.unit)
+                        }
+                    } else {
+                        "Chart".to_string()
+                    }
+                } else {
+                    "Metrics".to_string()
+                }
+            }
+        };
+
+        QueryResult {
+            title,
+            columns: vec![
+                "Metric".to_string(),
+                "Value".to_string(),
+                "Samples".to_string(),
+            ],
+            rows,
+            series_column: Some(1),
+        }
+    }
+
+    fn static_info_query(&self, mode: SeriesMode) -> QueryResult {
+        let rows = self
+            .info_series()
+            .iter()
+            .map(|series| QueryRow {
+                cells: vec![
+                    vec![SeriesValue::Text(series.label.clone())],
+                    series_values(series, mode),
+                ],
+                series_label: Some(series.label.clone()),
+                series_unit: Some(series.unit.clone()),
+                sample_count: Some(series.sample_count),
+            })
+            .collect();
+
+        QueryResult {
+            title: "Static Info".to_string(),
+            columns: vec!["Info".to_string(), "Value".to_string()],
+            rows,
+            series_column: Some(1),
         }
     }
 }
 
-fn format_number(value: f64) -> String {
-    let fixed = format!("{value:.2}");
-    fixed
-        .trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
+fn series_values(series: &DataSeries, mode: SeriesMode) -> Vec<SeriesValue> {
+    match mode {
+        SeriesMode::Latest => series.values.back().cloned().into_iter().collect(),
+        SeriesMode::Full => series.values.iter().cloned().collect(),
+    }
 }

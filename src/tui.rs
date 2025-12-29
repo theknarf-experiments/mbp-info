@@ -8,8 +8,8 @@ use ratatui::{
 };
 
 use crate::collector::SAMPLE_INTERVAL;
-use crate::data::DataStore;
-use crate::query::{Query, QueryProvider, QueryResult, SeriesResult, TableResult};
+use crate::data::{DataStore, SeriesValue};
+use crate::query::{Query, QueryProvider, QueryResult, QueryRow, QuerySource, SeriesMode};
 
 const CHART_COLORS: [Color; 6] = [
     Color::Cyan,
@@ -519,8 +519,16 @@ fn draw_metrics_list(
     focused: bool,
     area: Rect,
 ) {
-    let result = data.query(Query::metrics_table(app.selected, focused));
-    let table = TuiTable::from_result(result, app.selected, focused, "No metrics yet.");
+    let result = data.query(metrics_table_query(app.selected));
+    let rows = metrics_rows(&result, app.selected, focused);
+    let table = TuiTable::new(
+        result.title,
+        rows,
+        app.selected,
+        focused,
+        "No metrics yet.",
+        true,
+    );
     draw_tui_table(frame, &table, area);
 }
 
@@ -535,17 +543,11 @@ fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool
         return;
     }
 
-    let series_result = match data.query(Query::metrics_series(app.selected)) {
-        QueryResult::Series(result) => result,
-        _ => SeriesResult {
-            title: "Chart".to_string(),
-            series: Vec::new(),
-        },
-    };
-    let series_result = apply_chart_grouping(data, series_result);
+    let chart_result = chart_result_from_query(data.query(metrics_series_query(app.selected)));
+    let chart_result = apply_chart_grouping(data, chart_result);
 
-    if series_result.series.is_empty()
-        || series_result
+    if chart_result.series.is_empty()
+        || chart_result
             .series
             .iter()
             .all(|series| series.points.is_empty())
@@ -562,7 +564,7 @@ fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool
     let mut min = f64::INFINITY;
     let mut max = f64::NEG_INFINITY;
     let mut max_len = 0usize;
-    for series in &series_result.series {
+    for series in &chart_result.series {
         max_len = max_len.max(series.points.len());
         for (_, value) in &series.points {
             min = min.min(*value);
@@ -592,7 +594,7 @@ fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool
         (max_len.saturating_sub(1) as u64) * SAMPLE_INTERVAL.as_secs()
     );
 
-    let datasets: Vec<Dataset> = series_result
+    let datasets: Vec<Dataset> = chart_result
         .series
         .iter()
         .enumerate()
@@ -606,7 +608,7 @@ fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool
         .collect();
 
     let mut block = Block::default()
-        .title(series_result.title)
+        .title(chart_result.title)
         .borders(Borders::ALL);
     if focused {
         block = block.border_style(Style::default().fg(Color::Cyan));
@@ -634,8 +636,16 @@ fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool
 }
 
 fn draw_info_panel(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool, area: Rect) {
-    let result = data.query(Query::static_info_table(app.info_selected()));
-    let table = TuiTable::from_result(result, app.info_selected(), focused, "No static info yet.");
+    let result = data.query(static_info_query(app.info_selected()));
+    let rows = rows_from_query(&result);
+    let table = TuiTable::new(
+        result.title,
+        rows,
+        app.info_selected(),
+        focused,
+        "No static info yet.",
+        false,
+    );
     draw_tui_table(frame, &table, area);
 }
 
@@ -646,12 +656,15 @@ fn draw_collectors_panel(
     focused: bool,
     area: Rect,
 ) {
-    let result = collectors.query(Query::collectors_table(app.collectors_selected()));
-    let table = TuiTable::from_result(
-        result,
+    let result = collectors.query(collectors_table_query(app.collectors_selected()));
+    let rows = rows_from_query(&result);
+    let table = TuiTable::new(
+        result.title,
+        rows,
         app.collectors_selected(),
         focused,
         "No collectors registered.",
+        true,
     );
     draw_tui_table(frame, &table, area);
 }
@@ -749,14 +762,21 @@ struct TuiTable {
 }
 
 impl TuiTable {
-    fn new(result: TableResult, selected: usize, focused: bool, empty_text: &str) -> Self {
+    fn new(
+        title: String,
+        rows: Vec<Vec<String>>,
+        selected: usize,
+        focused: bool,
+        empty_text: &str,
+        right_align_last: bool,
+    ) -> Self {
         Self {
-            title: result.title,
-            rows: result.rows,
+            title,
+            rows,
             selected,
             focused,
             empty_text: empty_text.to_string(),
-            right_align_last: result.right_align_last,
+            right_align_last,
             border_style: None,
         }
     }
@@ -766,21 +786,6 @@ impl TuiTable {
         self
     }
 
-    fn from_result(result: QueryResult, selected: usize, focused: bool, empty_text: &str) -> Self {
-        match result {
-            QueryResult::Table(table) => Self::new(table, selected, focused, empty_text),
-            QueryResult::Series(_) => Self::new(
-                TableResult {
-                    title: "Series".to_string(),
-                    rows: Vec::new(),
-                    right_align_last: false,
-                },
-                selected,
-                focused,
-                empty_text,
-            ),
-        }
-    }
 }
 
 fn draw_tui_table(frame: &mut Frame, table: &TuiTable, area: Rect) {
@@ -854,20 +859,69 @@ fn draw_notice_popup(
     };
 
     let table = TuiTable::new(
-        TableResult {
-            title: title.to_string(),
-            rows: temp_rows,
-            right_align_last: false,
-        },
+        title.to_string(),
+        temp_rows,
         selected,
         true,
         "No output.",
+        false,
     )
     .with_border_style(border_style);
     draw_tui_table(frame, &table, popup_area);
 }
 
-fn apply_chart_grouping(data: &DataStore, base: SeriesResult) -> SeriesResult {
+#[derive(Clone)]
+struct ChartSeries {
+    label: String,
+    unit: String,
+    points: Vec<(f64, f64)>,
+}
+
+struct ChartResult {
+    title: String,
+    series: Vec<ChartSeries>,
+}
+
+fn chart_result_from_query(result: QueryResult) -> ChartResult {
+    let series = match result.series_column {
+        Some(index) => result
+            .rows
+            .iter()
+            .filter_map(|row| chart_series_from_row(row, index))
+            .collect(),
+        None => Vec::new(),
+    };
+
+    ChartResult {
+        title: result.title,
+        series,
+    }
+}
+
+fn chart_series_from_row(row: &QueryRow, series_column: usize) -> Option<ChartSeries> {
+    let values = row.cells.get(series_column)?;
+    let mut points = Vec::new();
+    for (index, value) in values.iter().enumerate() {
+        if let SeriesValue::Number(number) = value {
+            points.push((index as f64, *number));
+        }
+    }
+
+    let label = row
+        .series_label
+        .clone()
+        .or_else(|| row.cells.first().and_then(cell_label))
+        .unwrap_or_else(|| "Series".to_string());
+    let unit = row.series_unit.clone().unwrap_or_default();
+
+    Some(ChartSeries {
+        label,
+        unit,
+        points,
+    })
+}
+
+fn apply_chart_grouping(data: &DataStore, base: ChartResult) -> ChartResult {
     let Some(selected) = base.series.first() else {
         return base;
     };
@@ -876,10 +930,7 @@ fn apply_chart_grouping(data: &DataStore, base: SeriesResult) -> SeriesResult {
         return base;
     };
 
-    let all_series = match data.query(Query::metrics_series_all()) {
-        QueryResult::Series(result) => result,
-        _ => return base,
-    };
+    let all_series = chart_result_from_query(data.query(metrics_series_all_query()));
 
     let mut grouped = Vec::new();
     for label in labels {
@@ -902,7 +953,7 @@ fn apply_chart_grouping(data: &DataStore, base: SeriesResult) -> SeriesResult {
         format!("{group_name} ({})", selected.unit)
     };
 
-    SeriesResult {
+    ChartResult {
         title,
         series: grouped,
     }
@@ -919,14 +970,145 @@ fn group_rule_for_label(label: &str) -> Option<(&'static str, &'static [&'static
         .map(|(name, labels)| (*name, *labels))
 }
 
+fn metrics_table_query(selected: usize) -> Query {
+    Query {
+        source: QuerySource::Metrics,
+        selected_index: Some(selected),
+        mode: SeriesMode::Latest,
+    }
+}
+
+fn static_info_query(selected: usize) -> Query {
+    Query {
+        source: QuerySource::StaticInfo,
+        selected_index: Some(selected),
+        mode: SeriesMode::Latest,
+    }
+}
+
+fn collectors_table_query(selected: usize) -> Query {
+    Query {
+        source: QuerySource::Collectors,
+        selected_index: Some(selected),
+        mode: SeriesMode::Latest,
+    }
+}
+
+fn metrics_series_query(selected: usize) -> Query {
+    Query {
+        source: QuerySource::Metrics,
+        selected_index: Some(selected),
+        mode: SeriesMode::Full,
+    }
+}
+
+fn metrics_series_all_query() -> Query {
+    Query {
+        source: QuerySource::Metrics,
+        selected_index: None,
+        mode: SeriesMode::Full,
+    }
+}
+
 fn rows_from_text(text: &str) -> Vec<Vec<String>> {
     text.lines().map(|line| vec![line.to_string()]).collect()
 }
 
-fn format_value(value: f64) -> String {
+pub(crate) fn rows_from_query(result: &QueryResult) -> Vec<Vec<String>> {
+    result
+        .rows
+        .iter()
+        .map(|row| {
+            row.cells
+                .iter()
+                .enumerate()
+                .map(|(index, cell)| {
+                    let unit = if result.series_column == Some(index) {
+                        row.series_unit.as_deref().unwrap_or("")
+                    } else {
+                        ""
+                    };
+                    format_latest_cell(cell, unit)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn metrics_rows(result: &QueryResult, selected: usize, show_samples: bool) -> Vec<Vec<String>> {
+    let sample_column = result.columns.len().saturating_sub(1);
+    result
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let mut values = Vec::with_capacity(row.cells.len());
+            for (col_index, cell) in row.cells.iter().enumerate() {
+                if col_index == sample_column {
+                    if show_samples && index == selected {
+                        values.push(format_sample_cell(row));
+                    } else {
+                        values.push(String::new());
+                    }
+                    continue;
+                }
+
+                let unit = if result.series_column == Some(col_index) {
+                    row.series_unit.as_deref().unwrap_or("")
+                } else {
+                    ""
+                };
+                values.push(format_latest_cell(cell, unit));
+            }
+            values
+        })
+        .collect()
+}
+
+fn format_sample_cell(row: &QueryRow) -> String {
+    match row.sample_count {
+        Some(count) => sample_label(count),
+        None => String::new(),
+    }
+}
+
+fn sample_label(count: u64) -> String {
+    if count == 1 {
+        "1 sample".to_string()
+    } else {
+        format!("{count} samples")
+    }
+}
+
+fn format_latest_cell(values: &[SeriesValue], unit: &str) -> String {
+    match values.last() {
+        Some(SeriesValue::Number(value)) => {
+            if unit.is_empty() {
+                format_number(*value)
+            } else {
+                format!("{} {}", format_number(*value), unit)
+            }
+        }
+        Some(SeriesValue::Text(value)) => value.clone(),
+        None => "-".to_string(),
+    }
+}
+
+fn format_number(value: f64) -> String {
     let fixed = format!("{value:.2}");
     fixed
         .trim_end_matches('0')
         .trim_end_matches('.')
         .to_string()
+}
+
+fn cell_label(cell: &Vec<SeriesValue>) -> Option<String> {
+    cell.last().map(|value| match value {
+        SeriesValue::Number(value) => format_number(*value),
+        SeriesValue::Text(value) => value.clone(),
+    })
+}
+
+fn format_value(value: f64) -> String {
+    format_number(value)
 }
