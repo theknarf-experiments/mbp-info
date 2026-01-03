@@ -23,6 +23,9 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 #[cfg(target_os = "macos")]
 use crate::collector::macos;
+
+#[cfg(target_os = "linux")]
+use crate::collector::linux;
 use crate::collector::{needs_sudo, CollectorManager, CollectorMessage};
 use crate::command::{execute_named_command, handle_command_input, handle_notice_enter};
 use crate::data::{CollectorRegistration, DashboardStore, DataStore};
@@ -32,8 +35,8 @@ use crate::sudo::prompt_for_sudo;
 use crate::tui::{draw_ui, panel_at, AppState};
 
 fn main() -> io::Result<()> {
-    if !cfg!(target_os = "macos") {
-        eprintln!("mbp-info only supports macOS collectors.");
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        eprintln!("mbp-info only supports macOS and Linux collectors.");
         return Ok(());
     }
 
@@ -274,7 +277,12 @@ fn register_collectors(use_sudo: bool) -> Vec<CollectorRegistration> {
     macos::collectors(use_sudo)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn register_collectors(use_sudo: bool) -> Vec<CollectorRegistration> {
+    linux::collectors(use_sudo)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn register_collectors(_use_sudo: bool) -> Vec<CollectorRegistration> {
     vec![]
 }
