@@ -1,6 +1,7 @@
 # mbp-info
 
-A terminal-based system monitoring application for MacBook Pro. It displays real-time CPU, GPU, memory, and thermal metrics in an interactive dashboard.
+A terminal-based system monitoring application for Mac & Linux.
+It displays real-time CPU, GPU, memory, and thermal metrics in an interactive dashboard.
 
 ## Setup
 
