@@ -6,7 +6,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use crate::collector::CollectorManager;
 use crate::data::{DashboardStore, DataStore};
 use crate::input::InputBindings;
-use crate::query::{Query, QueryProvider, QuerySource, SeriesMode};
+use crate::query::{Query, QueryProvider};
 use crate::tui::{panel_navigate, rows_from_query, AppState, FocusPanel, NoticeAction, PanelMove};
 
 const COLLECTOR_ACTIONS: [&str; 2] = ["on", "off"];
@@ -311,23 +311,13 @@ pub fn execute_named_command(
             Ok(false)
         }
         "collectors" => {
-            let query = Query {
-                source: QuerySource::Collectors,
-                selected_index: Some(app.collectors_selected()),
-                mode: SeriesMode::Latest,
-            };
-            let result = manager.query(query);
+            let result = manager.query(&Query::collectors());
             let rows = rows_from_query(&result);
             app.set_notice(&result.title, rows, false);
             Ok(false)
         }
         "dashboards" => {
-            let query = Query {
-                source: QuerySource::Dashboards,
-                selected_index: None,
-                mode: SeriesMode::Latest,
-            };
-            let result = dashboards.query(query);
+            let result = dashboards.query(&Query::dashboards());
             let rows = rows_from_query(&result);
             app.set_notice_with_action(&result.title, rows, false, NoticeAction::DashboardGoto);
             Ok(false)

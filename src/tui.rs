@@ -2,24 +2,17 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     prelude::Frame,
     style::{Color, Modifier, Style},
-    symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, Borders, Chart, Clear, Dataset, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
-use crate::collector::SAMPLE_INTERVAL;
 use crate::data::{DashboardStore, DashboardType, DataStore, SeriesValue};
-use crate::query::{Query, QueryProvider, QueryResult, QueryRow, QuerySource, SeriesMode};
+use crate::query::{
+    Query, QueryContext, QueryProvider, QueryResult, SeriesKind, SeriesSelector, TimeRange,
+};
+use crate::widget::{draw_widget_grid, draw_widget_result, TableOptions, Widget, WidgetView};
 
-const CHART_COLORS: [Color; 6] = [
-    Color::Cyan,
-    Color::Yellow,
-    Color::Green,
-    Color::Magenta,
-    Color::LightBlue,
-    Color::LightRed,
-];
-
+/// Metrics charted together on the fixed dashboard when one of them is selected.
 static GROUP_RULES: &[(&str, &[&str])] = &[(
     "Die temperature",
     &["CPU die temperature", "GPU die temperature"],
@@ -535,38 +528,16 @@ pub fn draw_ui(
 
     draw_dashboard_bar(frame, dashboards, areas.dashboard);
 
-    match dashboards.active_type() {
-        DashboardType::FixedType => {
-            draw_metrics_list(
-                frame,
-                data,
-                app,
-                app.focus() == FocusPanel::Metrics,
-                areas.metrics,
-            );
-            draw_chart(
-                frame,
-                data,
-                app,
-                app.focus() == FocusPanel::Chart,
-                areas.chart,
-            );
-            draw_info_panel(
-                frame,
-                data,
-                app,
-                app.focus() == FocusPanel::Info,
-                areas.info,
-            );
-            draw_collectors_panel(
-                frame,
-                collectors,
-                app,
-                app.focus() == FocusPanel::Collectors,
-                areas.collectors,
-            );
+    let ctx = QueryContext {
+        data,
+        collectors,
+        dashboards,
+    };
+    match dashboards.active() {
+        Some(dashboard) if matches!(dashboard.kind, DashboardType::BlankType) => {
+            draw_widget_grid(frame, &dashboard.widgets, &ctx, areas.body)
         }
-        DashboardType::BlankType => draw_blank_dashboard(frame, areas.body),
+        _ => draw_fixed_dashboard(frame, &ctx, app, &areas),
     }
 
     if let Some(rows) = app.notice_rows() {
@@ -615,16 +586,6 @@ fn draw_dashboard_bar(frame: &mut Frame, dashboards: &DashboardStore, area: Rect
 
     let bar = Paragraph::new(Line::from(spans));
     frame.render_widget(bar, area);
-}
-
-fn draw_blank_dashboard(frame: &mut Frame, area: Rect) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-
-    let block = Block::default().title("Dashboard").borders(Borders::ALL);
-    let content = Paragraph::new("Blank dashboard").block(block);
-    frame.render_widget(content, area);
 }
 
 pub(crate) struct PanelAreas {
@@ -729,166 +690,6 @@ fn point_in_rect(rect: Rect, x: u16, y: u16) -> bool {
         && x < rect.x.saturating_add(rect.width)
         && y >= rect.y
         && y < rect.y.saturating_add(rect.height)
-}
-
-fn draw_metrics_list(
-    frame: &mut Frame,
-    data: &DataStore,
-    app: &AppState,
-    focused: bool,
-    area: Rect,
-) {
-    let result = data.query(metrics_table_query(app.selected));
-    let rows = metrics_rows(&result, app.selected, focused);
-    let table = TuiTable::new(
-        result.title,
-        result.columns,
-        rows,
-        app.selected,
-        focused,
-        "No metrics yet.",
-        true,
-    );
-    draw_tui_table(frame, &table, area);
-}
-
-fn draw_chart(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool, area: Rect) {
-    if data.metric_count() == 0 {
-        let mut block = Block::default().title("Chart").borders(Borders::ALL);
-        if focused {
-            block = block.border_style(Style::default().fg(Color::Cyan));
-        }
-        let empty = Paragraph::new("Waiting for powermetrics samples...").block(block);
-        frame.render_widget(empty, area);
-        return;
-    }
-
-    let chart_result = chart_result_from_query(data.query(metrics_series_query(app.selected)));
-    let chart_result = apply_chart_grouping(data, chart_result);
-
-    if chart_result.series.is_empty()
-        || chart_result
-            .series
-            .iter()
-            .all(|series| series.points.is_empty())
-    {
-        let mut block = Block::default().title("Chart").borders(Borders::ALL);
-        if focused {
-            block = block.border_style(Style::default().fg(Color::Cyan));
-        }
-        let empty = Paragraph::new("No data yet for selected metric.").block(block);
-        frame.render_widget(empty, area);
-        return;
-    }
-
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    let mut max_len = 0usize;
-    for series in &chart_result.series {
-        max_len = max_len.max(series.points.len());
-        for (_, value) in &series.points {
-            min = min.min(*value);
-            max = max.max(*value);
-        }
-    }
-
-    let padding = if (max - min).abs() < f64::EPSILON {
-        if max.abs() < f64::EPSILON {
-            1.0
-        } else {
-            max.abs() * 0.1
-        }
-    } else {
-        (max - min) * 0.1
-    };
-    let y_min = min - padding;
-    let y_max = max + padding;
-
-    let max_x = if max_len > 1 {
-        (max_len - 1) as f64
-    } else {
-        1.0
-    };
-    let oldest_label = format!(
-        "-{}s",
-        (max_len.saturating_sub(1) as u64) * SAMPLE_INTERVAL.as_secs()
-    );
-
-    let datasets: Vec<Dataset> = chart_result
-        .series
-        .iter()
-        .enumerate()
-        .map(|(index, series)| {
-            Dataset::default()
-                .name(series.label.clone())
-                .marker(symbols::Marker::Braille)
-                .style(Style::default().fg(CHART_COLORS[index % CHART_COLORS.len()]))
-                .data(&series.points)
-        })
-        .collect();
-
-    let mut block = Block::default()
-        .title(chart_result.title)
-        .borders(Borders::ALL);
-    if focused {
-        block = block.border_style(Style::default().fg(Color::Cyan));
-    }
-    let chart = Chart::new(datasets)
-        .block(block)
-        .x_axis(
-            Axis::default()
-                .title("time")
-                .bounds([0.0, max_x])
-                .labels(vec![Span::raw(oldest_label), Span::raw("now")]),
-        )
-        .y_axis(
-            Axis::default()
-                .title("value")
-                .bounds([y_min, y_max])
-                .labels(vec![
-                    Span::raw(format_value(y_min)),
-                    Span::raw(format_value((y_min + y_max) / 2.0)),
-                    Span::raw(format_value(y_max)),
-                ]),
-        );
-
-    frame.render_widget(chart, area);
-}
-
-fn draw_info_panel(frame: &mut Frame, data: &DataStore, app: &AppState, focused: bool, area: Rect) {
-    let result = data.query(static_info_query(app.info_selected()));
-    let rows = rows_from_query(&result);
-    let table = TuiTable::new(
-        result.title,
-        result.columns,
-        rows,
-        app.info_selected(),
-        focused,
-        "No static info yet.",
-        false,
-    );
-    draw_tui_table(frame, &table, area);
-}
-
-fn draw_collectors_panel(
-    frame: &mut Frame,
-    collectors: &dyn QueryProvider,
-    app: &AppState,
-    focused: bool,
-    area: Rect,
-) {
-    let result = collectors.query(collectors_table_query(app.collectors_selected()));
-    let rows = rows_from_query(&result);
-    let table = TuiTable::new(
-        result.title,
-        result.columns,
-        rows,
-        app.collectors_selected(),
-        focused,
-        "No collectors registered.",
-        true,
-    );
-    draw_tui_table(frame, &table, area);
 }
 
 fn draw_table_with_style(
@@ -1038,7 +839,7 @@ fn draw_table_with_style(
     frame.render_stateful_widget(list, list_area, &mut state);
 }
 
-struct TuiTable {
+pub(crate) struct TuiTable {
     title: String,
     columns: Vec<String>,
     rows: Vec<Vec<String>>,
@@ -1050,7 +851,7 @@ struct TuiTable {
 }
 
 impl TuiTable {
-    fn new(
+    pub(crate) fn new(
         title: String,
         columns: Vec<String>,
         rows: Vec<Vec<String>>,
@@ -1077,7 +878,7 @@ impl TuiTable {
     }
 }
 
-fn draw_tui_table(frame: &mut Frame, table: &TuiTable, area: Rect) {
+pub(crate) fn draw_tui_table(frame: &mut Frame, table: &TuiTable, area: Rect) {
     draw_table_with_style(
         frame,
         &table.columns,
@@ -1179,93 +980,109 @@ fn draw_notice_popup(
     draw_tui_table(frame, &table, popup_area);
 }
 
-#[derive(Clone)]
-struct ChartSeries {
-    label: String,
-    unit: String,
-    points: Vec<(f64, f64)>,
+fn draw_fixed_dashboard(frame: &mut Frame, ctx: &QueryContext, app: &AppState, areas: &PanelAreas) {
+    let metrics = Widget::table(
+        Query::series(SeriesSelector::kind(SeriesKind::Metric), TimeRange::Latest),
+        TableOptions {
+            show_samples: true,
+            right_align_last: true,
+        },
+    )
+    .with_empty_text("No metrics yet.");
+    let info = Widget::table(
+        Query::series(SeriesSelector::kind(SeriesKind::Info), TimeRange::Latest),
+        TableOptions::default(),
+    )
+    .with_empty_text("No static info yet.");
+    let collectors = Widget::table(
+        Query::collectors(),
+        TableOptions {
+            show_samples: false,
+            right_align_last: true,
+        },
+    )
+    .with_empty_text("No collectors registered.");
+
+    // The chart follows the metrics table selection, so its query is built
+    // from the selected row rather than reading screen state itself.
+    let metrics_result = ctx.query(&metrics.query);
+    let chart = chart_for_selection(&metrics_result, app.selected);
+
+    let view = |panel: FocusPanel, selected: usize| WidgetView {
+        focused: app.focus() == panel,
+        selected,
+    };
+    draw_widget_result(
+        frame,
+        &metrics,
+        &metrics_result,
+        view(FocusPanel::Metrics, app.selected),
+        areas.metrics,
+    );
+    draw_widget_result(
+        frame,
+        &chart,
+        &ctx.query(&chart.query),
+        view(FocusPanel::Chart, 0),
+        areas.chart,
+    );
+    draw_widget_result(
+        frame,
+        &info,
+        &ctx.query(&info.query),
+        view(FocusPanel::Info, app.info_selected()),
+        areas.info,
+    );
+    draw_widget_result(
+        frame,
+        &collectors,
+        &ctx.query(&collectors.query),
+        view(FocusPanel::Collectors, app.collectors_selected()),
+        areas.collectors,
+    );
 }
 
-struct ChartResult {
-    title: String,
-    series: Vec<ChartSeries>,
-}
-
-fn chart_result_from_query(result: QueryResult) -> ChartResult {
-    let series = match result.series_column {
-        Some(index) => result
-            .rows
-            .iter()
-            .filter_map(|row| chart_series_from_row(row, index))
-            .collect(),
-        None => Vec::new(),
+fn chart_for_selection(metrics: &QueryResult, selected: usize) -> Widget {
+    let all_series: Vec<_> = metrics
+        .rows
+        .iter()
+        .filter_map(|row| row.series.as_ref())
+        .collect();
+    let Some(selected) = all_series.get(selected) else {
+        return Widget::chart(Query::series(
+            SeriesSelector::ids(Vec::new()),
+            TimeRange::All,
+        ))
+        .with_title("Chart");
     };
 
-    ChartResult {
-        title: result.title,
-        series,
-    }
-}
-
-fn chart_series_from_row(row: &QueryRow, series_column: usize) -> Option<ChartSeries> {
-    let values = row.cells.get(series_column)?;
-    let mut points = Vec::new();
-    for (index, value) in values.iter().enumerate() {
-        if let SeriesValue::Number(number) = value {
-            points.push((index as f64, *number));
+    if let Some((group_name, labels)) = group_rule_for_label(&selected.label) {
+        let ids: Vec<String> = labels
+            .iter()
+            .filter_map(|label| {
+                all_series
+                    .iter()
+                    .find(|series| {
+                        label_matches(&series.label, label) && series.unit == selected.unit
+                    })
+                    .map(|series| series.id.clone())
+            })
+            .collect();
+        if !ids.is_empty() {
+            let title = if selected.unit.is_empty() {
+                group_name.to_string()
+            } else {
+                format!("{group_name} ({})", selected.unit)
+            };
+            return Widget::chart(Query::series(SeriesSelector::ids(ids), TimeRange::All))
+                .with_title(title);
         }
     }
 
-    let label = row
-        .series_label
-        .clone()
-        .or_else(|| row.cells.first().and_then(|cell| cell_label(cell)))
-        .unwrap_or_else(|| "Series".to_string());
-    let unit = row.series_unit.clone().unwrap_or_default();
-
-    Some(ChartSeries {
-        label,
-        unit,
-        points,
-    })
-}
-
-fn apply_chart_grouping(data: &DataStore, base: ChartResult) -> ChartResult {
-    let Some(selected) = base.series.first() else {
-        return base;
-    };
-
-    let Some((group_name, labels)) = group_rule_for_label(&selected.label) else {
-        return base;
-    };
-
-    let all_series = chart_result_from_query(data.query(metrics_series_all_query()));
-
-    let mut grouped = Vec::new();
-    for label in labels {
-        if let Some(found) = all_series
-            .series
-            .iter()
-            .find(|series| label_matches(&series.label, label) && series.unit == selected.unit)
-        {
-            grouped.push(found.clone());
-        }
-    }
-
-    if grouped.is_empty() {
-        return base;
-    }
-
-    let title = if selected.unit.is_empty() {
-        group_name.to_string()
-    } else {
-        format!("{group_name} ({})", selected.unit)
-    };
-
-    ChartResult {
-        title,
-        series: grouped,
-    }
+    Widget::chart(Query::series(
+        SeriesSelector::ids(vec![selected.id.clone()]),
+        TimeRange::All,
+    ))
 }
 
 fn label_matches(label: &str, other: &str) -> bool {
@@ -1277,46 +1094,6 @@ fn group_rule_for_label(label: &str) -> Option<(&'static str, &'static [&'static
         .iter()
         .find(|(_, labels)| labels.iter().any(|entry| label_matches(label, entry)))
         .map(|(name, labels)| (*name, *labels))
-}
-
-fn metrics_table_query(selected: usize) -> Query {
-    Query {
-        source: QuerySource::Metrics,
-        selected_index: Some(selected),
-        mode: SeriesMode::Latest,
-    }
-}
-
-fn static_info_query(selected: usize) -> Query {
-    Query {
-        source: QuerySource::StaticInfo,
-        selected_index: Some(selected),
-        mode: SeriesMode::Latest,
-    }
-}
-
-fn collectors_table_query(selected: usize) -> Query {
-    Query {
-        source: QuerySource::Collectors,
-        selected_index: Some(selected),
-        mode: SeriesMode::Latest,
-    }
-}
-
-fn metrics_series_query(selected: usize) -> Query {
-    Query {
-        source: QuerySource::Metrics,
-        selected_index: Some(selected),
-        mode: SeriesMode::Full,
-    }
-}
-
-fn metrics_series_all_query() -> Query {
-    Query {
-        source: QuerySource::Metrics,
-        selected_index: None,
-        mode: SeriesMode::Full,
-    }
 }
 
 fn rows_from_text(text: &str) -> Vec<Vec<String>> {
@@ -1332,94 +1109,36 @@ pub fn rows_from_query(result: &QueryResult) -> Vec<Vec<String>> {
                 .iter()
                 .enumerate()
                 .map(|(index, cell)| {
-                    let unit = if result.series_column == Some(index) {
-                        row.series_unit.as_deref().unwrap_or("")
-                    } else {
-                        ""
+                    let unit = match &row.series {
+                        Some(series) if result.value_column == Some(index) => series.unit.as_str(),
+                        _ => "",
                     };
-                    format_latest_cell(cell, unit)
+                    format_cell(cell, unit)
                 })
                 .collect()
         })
         .collect()
 }
 
-fn metrics_rows(result: &QueryResult, selected: usize, show_samples: bool) -> Vec<Vec<String>> {
-    let sample_column = result.columns.len().saturating_sub(1);
-    result
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let mut values = Vec::with_capacity(row.cells.len());
-            for (col_index, cell) in row.cells.iter().enumerate() {
-                if col_index == sample_column {
-                    if show_samples && index == selected {
-                        values.push(format_sample_cell(row));
-                    } else {
-                        values.push(String::new());
-                    }
-                    continue;
-                }
-
-                let unit = if result.series_column == Some(col_index) {
-                    row.series_unit.as_deref().unwrap_or("")
-                } else {
-                    ""
-                };
-                values.push(format_latest_cell(cell, unit));
-            }
-            values
-        })
-        .collect()
-}
-
-fn format_sample_cell(row: &QueryRow) -> String {
-    match row.sample_count {
-        Some(count) => sample_label(count),
-        None => String::new(),
-    }
-}
-
-fn sample_label(count: u64) -> String {
-    if count == 1 {
-        "1 sample".to_string()
-    } else {
-        format!("{count} samples")
-    }
-}
-
-fn format_latest_cell(values: &[SeriesValue], unit: &str) -> String {
-    match values.last() {
-        Some(SeriesValue::Number(value)) => {
+fn format_cell(value: &SeriesValue, unit: &str) -> String {
+    match value {
+        SeriesValue::Number(value) => {
             if unit.is_empty() {
                 format_number(*value)
             } else {
                 format!("{} {}", format_number(*value), unit)
             }
         }
-        Some(SeriesValue::Text(value)) => value.clone(),
-        None => "-".to_string(),
+        SeriesValue::Text(value) => value.clone(),
     }
 }
 
-fn format_number(value: f64) -> String {
+pub(crate) fn format_number(value: f64) -> String {
     let fixed = format!("{value:.2}");
     fixed
         .trim_end_matches('0')
         .trim_end_matches('.')
         .to_string()
-}
-
-fn cell_label(cell: &[SeriesValue]) -> Option<String> {
-    cell.last().map(|value| match value {
-        SeriesValue::Number(value) => format_number(*value),
-        SeriesValue::Text(value) => value.clone(),
-    })
-}
-
-fn format_value(value: f64) -> String {
-    format_number(value)
 }
 
 pub enum PanelMove {

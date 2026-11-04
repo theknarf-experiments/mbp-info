@@ -6,7 +6,7 @@ use std::sync::{
     Arc,
 };
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::data::{CollectorRegistration, ParsedDatum, Retention, SampleData, SeriesValue};
 use crate::query::{Query, QueryProvider, QueryResult, QueryRow, QuerySource};
@@ -32,6 +32,7 @@ pub trait Collector: Send {
 pub enum CollectorMessage {
     Sample {
         collector: &'static str,
+        at: SystemTime,
         data: SampleData,
     },
     Error {
@@ -54,6 +55,7 @@ pub fn spawn_collector(
                     Ok(data) => {
                         let _ = tx.send(CollectorMessage::Sample {
                             collector: id,
+                            at: SystemTime::now(),
                             data,
                         });
                     }
@@ -77,6 +79,7 @@ pub fn spawn_collector(
                 Ok(data) => {
                     let _ = tx.send(CollectorMessage::Sample {
                         collector: id,
+                        at: SystemTime::now(),
                         data,
                     });
                 }
@@ -291,15 +294,13 @@ impl CollectorManager {
                     .unwrap_or_else(|| "-".to_string());
                 QueryRow {
                     cells: vec![
-                        vec![SeriesValue::Text(reg.name.to_string())],
-                        vec![SeriesValue::Text(reg.id.to_string())],
-                        vec![SeriesValue::Text(status)],
-                        vec![SeriesValue::Text(interval)],
-                        vec![SeriesValue::Text(last_update)],
+                        SeriesValue::Text(reg.name.to_string()),
+                        SeriesValue::Text(reg.id.to_string()),
+                        SeriesValue::Text(status),
+                        SeriesValue::Text(interval),
+                        SeriesValue::Text(last_update),
                     ],
-                    series_label: None,
-                    series_unit: None,
-                    sample_count: None,
+                    series: None,
                 }
             })
             .collect()
@@ -316,7 +317,7 @@ impl CollectorManager {
                 "Last update".to_string(),
             ],
             rows: self.collector_rows(),
-            series_column: None,
+            value_column: None,
         }
     }
 
@@ -398,15 +399,10 @@ impl CollectorManager {
 }
 
 impl QueryProvider for CollectorManager {
-    fn query(&self, query: Query) -> QueryResult {
+    fn query(&self, query: &Query) -> QueryResult {
         match query.source {
             QuerySource::Collectors => self.collectors_query(),
-            _ => QueryResult {
-                title: "Unsupported".to_string(),
-                columns: Vec::new(),
-                rows: Vec::new(),
-                series_column: None,
-            },
+            _ => QueryResult::empty("Unsupported"),
         }
     }
 }

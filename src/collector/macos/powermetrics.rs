@@ -182,7 +182,14 @@ and the following sampler groups are supported by --samplers:
         let samplers = parse_supported_samplers(APPLE_SILICON_HELP);
         assert_eq!(
             samplers,
-            ["tasks", "battery", "cpu_power", "thermal", "gpu_power", "ane_power"]
+            [
+                "tasks",
+                "battery",
+                "cpu_power",
+                "thermal",
+                "gpu_power",
+                "ane_power"
+            ]
         );
     }
 

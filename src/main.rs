@@ -6,6 +6,7 @@ mod input;
 mod query;
 mod sudo;
 mod tui;
+mod widget;
 
 use std::env;
 use std::io;
@@ -133,10 +134,11 @@ fn run_app(
             match message {
                 CollectorMessage::Sample {
                     collector,
+                    at,
                     data: sample,
                 } => {
                     manager.record_sample(collector);
-                    data.apply_sample(sample);
+                    data.apply_sample(collector, at, sample);
                     app.clamp_selection(&data);
                 }
                 CollectorMessage::Error { collector, error } => {

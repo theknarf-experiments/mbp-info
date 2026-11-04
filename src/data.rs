@@ -1,8 +1,12 @@
 use std::collections::{HashMap, VecDeque};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::collector::Collector;
-use crate::query::{Query, QueryResult, QueryRow, QuerySource, SeriesMode};
+use crate::query::{
+    Query, QueryProvider, QueryResult, QueryRow, QuerySource, SeriesData, SeriesKind,
+    SeriesSelector,
+};
+use crate::widget::Widget;
 
 #[derive(Clone, Debug)]
 pub enum Retention {
@@ -23,12 +27,40 @@ pub enum SeriesValue {
 }
 
 #[derive(Clone, Debug)]
+pub struct Point {
+    pub at: SystemTime,
+    pub value: SeriesValue,
+}
+
+#[derive(Clone, Debug)]
 pub struct DataSeries {
+    /// Store-wide id: `<collector>/<key>`.
+    pub id: String,
+    pub collector: &'static str,
     pub label: String,
     pub unit: String,
     pub retention: Retention,
-    pub values: VecDeque<SeriesValue>,
+    pub points: VecDeque<Point>,
     pub sample_count: u64,
+}
+
+impl DataSeries {
+    fn matches(&self, selector: &SeriesSelector) -> bool {
+        let kind_matches = match selector.kind {
+            SeriesKind::Any => true,
+            SeriesKind::Metric => self.retention.is_rolling(),
+            SeriesKind::Info => !self.retention.is_rolling(),
+        };
+        kind_matches
+            && selector
+                .collector
+                .as_deref()
+                .is_none_or(|collector| collector == self.collector)
+    }
+}
+
+pub fn series_id(collector: &str, key: &str) -> String {
+    format!("{collector}/{key}")
 }
 
 #[derive(Clone, Debug)]
@@ -68,6 +100,7 @@ impl DashboardType {
 #[derive(Clone, Debug)]
 pub struct Dashboard {
     pub kind: DashboardType,
+    pub widgets: Vec<Widget>,
 }
 
 pub struct DashboardStore {
@@ -104,185 +137,111 @@ impl DataStore {
         }
     }
 
-    pub fn apply_sample(&mut self, data: SampleData) {
+    pub fn apply_sample(&mut self, collector: &'static str, at: SystemTime, data: SampleData) {
         for entry in data.entries {
-            let is_new = !self.series.contains_key(&entry.key);
-            let series = self
-                .series
-                .entry(entry.key.clone())
-                .or_insert_with(|| DataSeries {
-                    label: entry.label.clone(),
-                    unit: entry.unit.clone(),
-                    retention: entry.retention.clone(),
-                    values: VecDeque::new(),
-                    sample_count: 0,
-                });
+            let id = series_id(collector, &entry.key);
+            let is_new = !self.series.contains_key(&id);
+            let series = self.series.entry(id.clone()).or_insert_with(|| DataSeries {
+                id: id.clone(),
+                collector,
+                label: entry.label.clone(),
+                unit: entry.unit.clone(),
+                retention: entry.retention.clone(),
+                points: VecDeque::new(),
+                sample_count: 0,
+            });
 
-            series.label = entry.label.clone();
-            series.unit = entry.unit.clone();
-            series.retention = entry.retention.clone();
+            series.label = entry.label;
+            series.unit = entry.unit;
+            series.retention = entry.retention;
 
+            let point = Point {
+                at,
+                value: entry.value,
+            };
             match series.retention {
                 Retention::Rolling(max) => {
-                    series.values.push_back(entry.value);
-                    while series.values.len() > max {
-                        series.values.pop_front();
+                    series.points.push_back(point);
+                    while series.points.len() > max {
+                        series.points.pop_front();
                     }
                 }
                 Retention::Latest => {
-                    series.values.clear();
-                    series.values.push_back(entry.value);
+                    series.points.clear();
+                    series.points.push_back(point);
                 }
             }
 
             series.sample_count = series.sample_count.saturating_add(1);
 
             if is_new {
-                self.order.push(entry.key);
+                self.order.push(id);
             }
         }
     }
 
-    pub fn metric_series(&self) -> Vec<&DataSeries> {
-        self.order
+    fn select(&self, selector: &SeriesSelector) -> Vec<&DataSeries> {
+        let candidates = selector.ids.as_ref().unwrap_or(&self.order);
+        candidates
             .iter()
-            .filter_map(|key| {
-                self.series
-                    .get(key)
-                    .filter(|series| series.retention.is_rolling())
-            })
-            .collect()
-    }
-
-    pub fn info_series(&self) -> Vec<&DataSeries> {
-        self.order
-            .iter()
-            .filter_map(|key| {
-                self.series
-                    .get(key)
-                    .filter(|series| !series.retention.is_rolling())
-            })
+            .filter_map(|id| self.series.get(id))
+            .filter(|series| series.matches(selector))
             .collect()
     }
 
     pub fn metric_count(&self) -> usize {
-        self.metric_series().len()
+        self.select(&SeriesSelector::kind(SeriesKind::Metric)).len()
     }
 
     pub fn info_count(&self) -> usize {
-        self.info_series().len()
+        self.select(&SeriesSelector::kind(SeriesKind::Info)).len()
     }
 
-    pub fn metric_series_at(&self, index: usize) -> Option<&DataSeries> {
-        let metrics = self.metric_series();
-        metrics.get(index).copied()
-    }
-
-    pub fn query(&self, query: Query) -> QueryResult {
-        match query.source {
-            QuerySource::Metrics => self.metrics_query(query.selected_index, query.mode),
-            QuerySource::StaticInfo => self.static_info_query(query.mode),
-            QuerySource::Collectors => QueryResult {
-                title: "Collectors".to_string(),
-                columns: Vec::new(),
-                rows: Vec::new(),
-                series_column: None,
-            },
-            QuerySource::Dashboards => QueryResult {
-                title: "Dashboards".to_string(),
-                columns: Vec::new(),
-                rows: Vec::new(),
-                series_column: None,
-            },
-        }
-    }
-
-    fn metrics_query(&self, selected_index: Option<usize>, mode: SeriesMode) -> QueryResult {
-        let entries = self.metric_series();
-        let selected_entries: Vec<&DataSeries> = match mode {
-            SeriesMode::Latest => entries,
-            SeriesMode::Full => {
-                if let Some(index) = selected_index {
-                    entries.get(index).copied().into_iter().collect()
-                } else {
-                    entries
-                }
-            }
+    pub fn query_at(&self, query: &Query, now: SystemTime) -> QueryResult {
+        let QuerySource::Series(selector) = &query.source else {
+            return QueryResult::empty("Unsupported");
         };
 
-        let rows = selected_entries
-            .iter()
-            .map(|series| QueryRow {
-                cells: vec![
-                    vec![SeriesValue::Text(series.label.clone())],
-                    series_values(series, mode),
-                    vec![SeriesValue::Number(series.sample_count as f64)],
-                ],
-                series_label: Some(series.label.clone()),
-                series_unit: Some(series.unit.clone()),
-                sample_count: Some(series.sample_count),
-            })
-            .collect();
-
-        let title = match mode {
-            SeriesMode::Latest => "Metrics".to_string(),
-            SeriesMode::Full => {
-                if let Some(index) = selected_index {
-                    if let Some(selected) = self.metric_series_at(index) {
-                        if selected.unit.is_empty() {
-                            selected.label.clone()
-                        } else {
-                            format!("{} ({})", selected.label, selected.unit)
-                        }
-                    } else {
-                        "Chart".to_string()
-                    }
-                } else {
-                    "Metrics".to_string()
-                }
-            }
-        };
-
-        QueryResult {
-            title,
-            columns: vec![
-                "Metric".to_string(),
-                "Value".to_string(),
-                "Samples".to_string(),
-            ],
-            rows,
-            series_column: Some(1),
-        }
-    }
-
-    fn static_info_query(&self, mode: SeriesMode) -> QueryResult {
         let rows = self
-            .info_series()
-            .iter()
-            .map(|series| QueryRow {
-                cells: vec![
-                    vec![SeriesValue::Text(series.label.clone())],
-                    series_values(series, mode),
-                ],
-                series_label: Some(series.label.clone()),
-                series_unit: Some(series.unit.clone()),
-                sample_count: Some(series.sample_count),
+            .select(selector)
+            .into_iter()
+            .map(|series| {
+                let points = query.range.select(series.points.iter().cloned(), now);
+                let latest = points
+                    .last()
+                    .map(|point| point.value.clone())
+                    .unwrap_or_else(|| SeriesValue::Text("-".to_string()));
+                QueryRow {
+                    cells: vec![SeriesValue::Text(series.label.clone()), latest],
+                    series: Some(SeriesData {
+                        id: series.id.clone(),
+                        label: series.label.clone(),
+                        unit: series.unit.clone(),
+                        sample_count: series.sample_count,
+                        points,
+                    }),
+                }
             })
             .collect();
 
+        let (title, name_column) = match selector.kind {
+            SeriesKind::Metric => ("Metrics", "Metric"),
+            SeriesKind::Info => ("Static Info", "Info"),
+            SeriesKind::Any => ("Series", "Series"),
+        };
+
         QueryResult {
-            title: "Static Info".to_string(),
-            columns: vec!["Info".to_string(), "Value".to_string()],
+            title: title.to_string(),
+            columns: vec![name_column.to_string(), "Value".to_string()],
             rows,
-            series_column: Some(1),
+            value_column: Some(1),
         }
     }
 }
 
-fn series_values(series: &DataSeries, mode: SeriesMode) -> Vec<SeriesValue> {
-    match mode {
-        SeriesMode::Latest => series.values.back().cloned().into_iter().collect(),
-        SeriesMode::Full => series.values.iter().cloned().collect(),
+impl QueryProvider for DataStore {
+    fn query(&self, query: &Query) -> QueryResult {
+        self.query_at(query, SystemTime::now())
     }
 }
 
@@ -291,6 +250,7 @@ impl DashboardStore {
         Self {
             dashboards: vec![Dashboard {
                 kind: DashboardType::FixedType,
+                widgets: Vec::new(),
             }],
             active: 0,
         }
@@ -304,9 +264,12 @@ impl DashboardStore {
         self.active
     }
 
+    pub fn active(&self) -> Option<&Dashboard> {
+        self.dashboards.get(self.active)
+    }
+
     pub fn active_type(&self) -> DashboardType {
-        self.dashboards
-            .get(self.active)
+        self.active()
             .map(|dashboard| dashboard.kind.clone())
             .unwrap_or(DashboardType::FixedType)
     }
@@ -314,6 +277,7 @@ impl DashboardStore {
     pub fn add_blank(&mut self) {
         self.dashboards.push(Dashboard {
             kind: DashboardType::BlankType,
+            widgets: Vec::new(),
         });
         self.active = self.dashboards.len().saturating_sub(1);
     }
@@ -363,25 +327,25 @@ impl DashboardStore {
             self.active -= 1;
         }
     }
+}
 
-    pub fn query(&self, _query: Query) -> QueryResult {
+impl QueryProvider for DashboardStore {
+    fn query(&self, _query: &Query) -> QueryResult {
         let rows = self
             .dashboards
             .iter()
             .enumerate()
             .map(|(index, dashboard)| QueryRow {
                 cells: vec![
-                    vec![SeriesValue::Text((index + 1).to_string())],
-                    vec![SeriesValue::Text(dashboard.kind.label().to_string())],
-                    vec![SeriesValue::Text(if index == self.active {
+                    SeriesValue::Text((index + 1).to_string()),
+                    SeriesValue::Text(dashboard.kind.label().to_string()),
+                    SeriesValue::Text(if index == self.active {
                         "active".to_string()
                     } else {
                         String::new()
-                    })],
+                    }),
                 ],
-                series_label: None,
-                series_unit: None,
-                sample_count: None,
+                series: None,
             })
             .collect();
 
@@ -389,7 +353,101 @@ impl DashboardStore {
             title: "Dashboards".to_string(),
             columns: vec!["#".to_string(), "Type".to_string(), "Active".to_string()],
             rows,
-            series_column: None,
+            value_column: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::TimeRange;
+
+    fn datum(key: &str, value: f64) -> ParsedDatum {
+        ParsedDatum {
+            key: key.to_string(),
+            label: key.to_string(),
+            unit: "W".to_string(),
+            retention: Retention::Rolling(10),
+            value: SeriesValue::Number(value),
+        }
+    }
+
+    fn sample(entries: Vec<ParsedDatum>) -> SampleData {
+        SampleData { entries }
+    }
+
+    fn at(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    fn values(result: &QueryResult) -> Vec<Vec<f64>> {
+        result
+            .rows
+            .iter()
+            .map(|row| {
+                row.series
+                    .as_ref()
+                    .unwrap()
+                    .points
+                    .iter()
+                    .map(|point| match point.value {
+                        SeriesValue::Number(value) => value,
+                        SeriesValue::Text(_) => f64::NAN,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn same_key_from_different_collectors_stays_separate() {
+        let mut store = DataStore::new();
+        store.apply_sample("a", at(1), sample(vec![datum("power", 1.0)]));
+        store.apply_sample("b", at(1), sample(vec![datum("power", 2.0)]));
+
+        let mut selector = SeriesSelector::kind(SeriesKind::Any);
+        selector.collector = Some("b".to_string());
+        let result = store.query_at(&Query::series(selector, TimeRange::All), at(1));
+        assert_eq!(values(&result), vec![vec![2.0]]);
+        assert_eq!(result.rows[0].series.as_ref().unwrap().id, "b/power");
+    }
+
+    #[test]
+    fn range_queries_filter_by_timestamp() {
+        let mut store = DataStore::new();
+        for secs in 0..10 {
+            store.apply_sample("a", at(secs), sample(vec![datum("power", secs as f64)]));
+        }
+        let selector = || SeriesSelector::ids(vec!["a/power".to_string()]);
+        let now = at(9);
+
+        let latest = store.query_at(&Query::series(selector(), TimeRange::Latest), now);
+        assert_eq!(values(&latest), vec![vec![9.0]]);
+
+        let last = TimeRange::Last(Duration::from_secs(2));
+        let last = store.query_at(&Query::series(selector(), last), now);
+        assert_eq!(values(&last), vec![vec![7.0, 8.0, 9.0]]);
+
+        let between = TimeRange::Between {
+            from: at(3),
+            to: at(5),
+        };
+        let between = store.query_at(&Query::series(selector(), between), now);
+        assert_eq!(values(&between), vec![vec![3.0, 4.0, 5.0]]);
+    }
+
+    #[test]
+    fn id_selector_keeps_requested_order() {
+        let mut store = DataStore::new();
+        store.apply_sample(
+            "a",
+            at(1),
+            sample(vec![datum("first", 1.0), datum("second", 2.0)]),
+        );
+
+        let selector = SeriesSelector::ids(vec!["a/second".to_string(), "a/first".to_string()]);
+        let result = store.query_at(&Query::series(selector, TimeRange::Latest), at(1));
+        assert_eq!(values(&result), vec![vec![2.0], vec![1.0]]);
     }
 }
