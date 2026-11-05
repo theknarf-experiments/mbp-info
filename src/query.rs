@@ -19,6 +19,8 @@ pub struct SeriesSelector {
     /// Exact series ids, returned in the order given. `None` matches every
     /// series.
     pub ids: Option<Vec<String>>,
+    /// Case-insensitive glob over series ids (`*` and `?` wildcards).
+    pub pattern: Option<String>,
 }
 
 impl SeriesSelector {
@@ -27,6 +29,16 @@ impl SeriesSelector {
             kind,
             collector: None,
             ids: None,
+            pattern: None,
+        }
+    }
+
+    pub fn pattern(pattern: impl Into<String>) -> Self {
+        Self {
+            kind: SeriesKind::Any,
+            collector: None,
+            ids: None,
+            pattern: Some(pattern.into()),
         }
     }
 
@@ -35,6 +47,7 @@ impl SeriesSelector {
             kind: SeriesKind::Any,
             collector: None,
             ids: Some(ids),
+            pattern: None,
         }
     }
 }
@@ -46,14 +59,52 @@ pub enum TimeRange {
     /// Every retained point.
     All,
     /// Points no older than the duration.
-    #[allow(dead_code)] // Not used by the built-in dashboard yet.
     Last(Duration),
     /// Points with `from <= at <= to`.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // No command creates absolute ranges yet.
     Between { from: SystemTime, to: SystemTime },
 }
 
 impl TimeRange {
+    /// Parses `latest`, `all`, or a duration like `30s`, `5m`, `2h`.
+    pub fn parse(input: &str) -> Option<Self> {
+        match input.to_ascii_lowercase().as_str() {
+            "latest" => return Some(TimeRange::Latest),
+            "all" => return Some(TimeRange::All),
+            _ => {}
+        }
+        let unit = input.chars().last()?;
+        let multiplier = match unit {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            _ => return None,
+        };
+        let amount: u64 = input[..input.len() - 1].parse().ok()?;
+        if amount == 0 {
+            return None;
+        }
+        Some(TimeRange::Last(Duration::from_secs(amount * multiplier)))
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            TimeRange::Latest => "latest".to_string(),
+            TimeRange::All => "all".to_string(),
+            TimeRange::Last(duration) => {
+                let secs = duration.as_secs();
+                if secs % 3600 == 0 {
+                    format!("last {}h", secs / 3600)
+                } else if secs % 60 == 0 {
+                    format!("last {}m", secs / 60)
+                } else {
+                    format!("last {secs}s")
+                }
+            }
+            TimeRange::Between { .. } => "between".to_string(),
+        }
+    }
+
     pub fn select(
         &self,
         points: impl DoubleEndedIterator<Item = Point>,
@@ -71,6 +122,32 @@ impl TimeRange {
                 .collect(),
         }
     }
+}
+
+/// Case-insensitive glob match supporting `*` (any run) and `?` (one char).
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.to_lowercase().chars().collect();
+    let text: Vec<char> = text.to_lowercase().chars().collect();
+    let (mut p, mut t) = (0, 0);
+    let mut backtrack: Option<(usize, usize)> = None;
+
+    while t < text.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            backtrack = Some((p, t));
+            p += 1;
+        } else if let Some((star, matched)) = backtrack {
+            p = star + 1;
+            t = matched + 1;
+            backtrack = Some((star, t));
+        } else {
+            return false;
+        }
+    }
+
+    pattern[p..].iter().all(|ch| *ch == '*')
 }
 
 #[derive(Clone, Debug)]
@@ -163,5 +240,45 @@ impl QueryProvider for QueryContext<'_> {
             QuerySource::Collectors => self.collectors.query(query),
             QuerySource::Dashboards => self.dashboards.query(query),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glob_matches_wildcards_case_insensitively() {
+        assert!(glob_match("*", "anything/at all"));
+        assert!(glob_match(
+            "powermetrics/*",
+            "powermetrics/CPU die temperature|C"
+        ));
+        assert!(glob_match(
+            "cpu_usage/cpu core ?? usage*",
+            "cpu_usage/CPU Core 12 usage|%"
+        ));
+        assert!(!glob_match(
+            "cpu_usage/cpu core ?? usage*",
+            "cpu_usage/CPU Core 1 usage|%"
+        ));
+        assert!(glob_match("*die*", "powermetrics/GPU die temperature|C"));
+        assert!(!glob_match("memory_usage/*", "swap_usage/Swap Used|MB"));
+    }
+
+    #[test]
+    fn parses_ranges() {
+        assert!(matches!(
+            TimeRange::parse("latest"),
+            Some(TimeRange::Latest)
+        ));
+        assert!(matches!(TimeRange::parse("ALL"), Some(TimeRange::All)));
+        assert!(matches!(
+            TimeRange::parse("5m"),
+            Some(TimeRange::Last(duration)) if duration == Duration::from_secs(300)
+        ));
+        assert!(TimeRange::parse("0s").is_none());
+        assert!(TimeRange::parse("5x").is_none());
+        assert!(TimeRange::parse("powermetrics/*").is_none());
     }
 }

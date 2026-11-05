@@ -10,7 +10,9 @@ use ratatui::{
 };
 
 use crate::data::SeriesValue;
-use crate::query::{Query, QueryProvider, QueryResult, TimeRange};
+use crate::query::{
+    Query, QueryProvider, QueryResult, QuerySource, SeriesKind, SeriesSelector, TimeRange,
+};
 use crate::tui::{draw_tui_table, format_number, rows_from_query, TuiTable};
 
 const CHART_COLORS: [Color; 6] = [
@@ -63,6 +65,56 @@ impl Widget {
         }
     }
 
+    /// Parses `<table|chart> [range] <pattern>`. The pattern is the rest of
+    /// the input, so it may contain spaces.
+    pub fn parse(args: &str) -> Result<Self, String> {
+        let usage = || {
+            format!(
+                "Usage: :widget_add <{}> [range] <pattern>",
+                WIDGET_KINDS.join("|")
+            )
+        };
+        let (kind, rest) = split_word(args).ok_or_else(usage)?;
+        let (range, pattern) = match split_word(rest) {
+            Some((word, after)) => match TimeRange::parse(word) {
+                Some(range) => (Some(range), after),
+                None => (None, rest),
+            },
+            None => (None, rest),
+        };
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return Err(usage());
+        }
+
+        let selector = SeriesSelector::pattern(pattern);
+        let widget = match kind {
+            "table" => Widget::table(
+                Query::series(selector, range.unwrap_or(TimeRange::Latest)),
+                TableOptions::default(),
+            ),
+            "chart" => Widget::chart(Query::series(selector, range.unwrap_or(TimeRange::All))),
+            _ => return Err(format!("Unknown widget kind: {kind}. {}", usage())),
+        };
+        Ok(widget
+            .with_title(pattern)
+            .with_empty_text(format!("No series match {pattern}")))
+    }
+
+    /// Kind, range and source, for listing widgets.
+    pub fn describe(&self) -> Vec<String> {
+        let kind = match self.kind {
+            WidgetKind::Table(_) => "table",
+            WidgetKind::Chart => "chart",
+        };
+        let source = match &self.query.source {
+            QuerySource::Series(selector) => describe_selector(selector),
+            QuerySource::Collectors => "collectors".to_string(),
+            QuerySource::Dashboards => "dashboards".to_string(),
+        };
+        vec![kind.to_string(), self.query.range.describe(), source]
+    }
+
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
         self
@@ -71,6 +123,39 @@ impl Widget {
     pub fn with_empty_text(mut self, text: impl Into<String>) -> Self {
         self.empty_text = Some(text.into());
         self
+    }
+}
+
+pub const WIDGET_KINDS: [&str; 2] = ["table", "chart"];
+
+fn split_word(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return None;
+    }
+    Some(input.split_once(char::is_whitespace).unwrap_or((input, "")))
+}
+
+fn describe_selector(selector: &SeriesSelector) -> String {
+    let mut parts = Vec::new();
+    if let Some(pattern) = &selector.pattern {
+        parts.push(pattern.clone());
+    }
+    if let Some(ids) = &selector.ids {
+        parts.push(ids.join(", "));
+    }
+    if let Some(collector) = &selector.collector {
+        parts.push(format!("collector={collector}"));
+    }
+    match selector.kind {
+        SeriesKind::Any => {}
+        SeriesKind::Metric => parts.push("metrics".to_string()),
+        SeriesKind::Info => parts.push("info".to_string()),
+    }
+    if parts.is_empty() {
+        "all series".to_string()
+    } else {
+        parts.join(" ")
     }
 }
 
@@ -328,5 +413,41 @@ fn sample_label(count: u64) -> String {
         "1 sample".to_string()
     } else {
         format!("{count} samples")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn parses_widget_with_range_and_spaced_pattern() {
+        let widget = Widget::parse("chart 5m cpu_usage/CPU Core*").unwrap();
+        assert!(matches!(widget.kind, WidgetKind::Chart));
+        assert!(matches!(
+            widget.query.range,
+            TimeRange::Last(duration) if duration == Duration::from_secs(300)
+        ));
+        assert_eq!(
+            widget.describe(),
+            ["chart", "last 5m", "cpu_usage/CPU Core*"]
+        );
+    }
+
+    #[test]
+    fn range_is_optional() {
+        let widget = Widget::parse("table powermetrics/*").unwrap();
+        assert_eq!(widget.describe(), ["table", "latest", "powermetrics/*"]);
+        let widget = Widget::parse("chart Memory Used*").unwrap();
+        assert_eq!(widget.describe(), ["chart", "all", "Memory Used*"]);
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(Widget::parse("").is_err());
+        assert!(Widget::parse("chart").is_err());
+        assert!(Widget::parse("chart 5m").is_err());
+        assert!(Widget::parse("gauge *").is_err());
     }
 }

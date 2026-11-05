@@ -8,6 +8,7 @@ use crate::data::{DashboardStore, DataStore};
 use crate::input::InputBindings;
 use crate::query::{Query, QueryProvider};
 use crate::tui::{panel_navigate, rows_from_query, AppState, FocusPanel, NoticeAction, PanelMove};
+use crate::widget::{Widget, WIDGET_KINDS};
 
 const COLLECTOR_ACTIONS: [&str; 2] = ["on", "off"];
 
@@ -232,6 +233,26 @@ fn run_command(
             }
             Ok(false)
         }
+        "widget_add" => {
+            let args = command[root.len()..].trim_start();
+            if let Err(error) = Widget::parse(args).and_then(|widget| dashboards.add_widget(widget))
+            {
+                app.set_error(Some(error));
+            }
+            Ok(false)
+        }
+        "widget_delete" => {
+            let Some(value) = parts.next() else {
+                app.set_error(Some("Usage: :widget_delete <n>".to_string()));
+                return Ok(false);
+            };
+            if let Err(error) =
+                parse_index("widget", value).and_then(|index| dashboards.remove_widget(index))
+            {
+                app.set_error(Some(error));
+            }
+            Ok(false)
+        }
         "dashboard_goto" => {
             let Some(value) = parts.next() else {
                 app.set_error(Some("Usage: :dashboard_goto <n>".to_string()));
@@ -326,6 +347,10 @@ pub fn execute_named_command(
             dashboards.add_blank();
             Ok(false)
         }
+        "widgets" => {
+            app.set_notice("Widgets", dashboards.widget_rows(), false);
+            Ok(false)
+        }
         "dashboard_next" => {
             dashboards.next();
             Ok(false)
@@ -394,6 +419,15 @@ fn build_help_rows() -> Vec<Vec<String>> {
         vec![
             ":dashboard_goto <n>".to_string(),
             "switch dashboard".to_string(),
+        ],
+        vec![":widgets".to_string(), "list widgets".to_string()],
+        vec![
+            ":widget_add <table|chart> [range] <pattern>".to_string(),
+            "add widget (range: latest, all, 30s, 5m, 2h)".to_string(),
+        ],
+        vec![
+            ":widget_delete <n>".to_string(),
+            "remove widget".to_string(),
         ],
         vec![
             ":leader_set <key>".to_string(),
@@ -468,11 +502,18 @@ pub fn handle_notice_enter(app: &mut AppState, dashboards: &mut DashboardStore) 
 }
 
 fn parse_dashboard_index(value: &str) -> Result<usize, String> {
+    parse_index("dashboard", value)
+}
+
+/// Parses a 1-based index typed by the user into a 0-based one.
+fn parse_index(what: &str, value: &str) -> Result<usize, String> {
     let parsed: usize = value
         .parse()
-        .map_err(|_| format!("Invalid dashboard index: {value}"))?;
+        .map_err(|_| format!("Invalid {what} index: {value}"))?;
     if parsed == 0 {
-        return Err("Dashboard index starts at 1.".to_string());
+        let mut what = what.to_string();
+        what[..1].make_ascii_uppercase();
+        return Err(format!("{what} index starts at 1."));
     }
     Ok(parsed - 1)
 }
@@ -501,6 +542,11 @@ fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
         let prefix = tokens[0];
         let matches = collect_matches(crate::input::COMMANDS, prefix, |_| true);
         apply_completion(app, &buffer, prefix, matches);
+        return;
+    }
+
+    if tokens[0] == "widget_add" {
+        complete_widget_add(app, &buffer, tokens.as_slice(), trailing_space, collectors);
         return;
     }
 
@@ -558,6 +604,46 @@ fn complete_command_buffer(app: &mut AppState, collectors: &[&'static str]) {
             });
             apply_completion(app, &buffer, prefix, matches);
         }
+    }
+}
+
+/// Completes the widget kind, then offers `<collector>/*` patterns.
+fn complete_widget_add(
+    app: &mut AppState,
+    buffer: &str,
+    tokens: &[&str],
+    trailing_space: bool,
+    collectors: &[&'static str],
+) {
+    let patterns: Vec<String> = collectors.iter().map(|id| format!("{id}/*")).collect();
+    let patterns: Vec<&str> = patterns.iter().map(String::as_str).collect();
+    match (tokens.len(), trailing_space) {
+        (1, true) => apply_completion(
+            app,
+            buffer,
+            "",
+            collect_matches(&WIDGET_KINDS, "", |_| true),
+        ),
+        (2, false) => {
+            let prefix = tokens[1];
+            apply_completion(
+                app,
+                buffer,
+                prefix,
+                collect_matches(&WIDGET_KINDS, prefix, |_| true),
+            );
+        }
+        (2, true) => apply_completion(app, buffer, "", collect_matches(&patterns, "", |_| true)),
+        (3, false) => {
+            let prefix = tokens[2];
+            apply_completion(
+                app,
+                buffer,
+                prefix,
+                collect_matches(&patterns, prefix, |_| true),
+            );
+        }
+        _ => {}
     }
 }
 

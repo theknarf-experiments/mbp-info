@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::collector::Collector;
 use crate::query::{
-    Query, QueryProvider, QueryResult, QueryRow, QuerySource, SeriesData, SeriesKind,
+    glob_match, Query, QueryProvider, QueryResult, QueryRow, QuerySource, SeriesData, SeriesKind,
     SeriesSelector,
 };
 use crate::widget::Widget;
@@ -56,6 +56,10 @@ impl DataSeries {
                 .collector
                 .as_deref()
                 .is_none_or(|collector| collector == self.collector)
+            && selector
+                .pattern
+                .as_deref()
+                .is_none_or(|pattern| glob_match(pattern, &self.id))
     }
 }
 
@@ -300,6 +304,55 @@ impl DashboardStore {
         }
 
         Ok(())
+    }
+
+    fn active_editable(&mut self) -> Result<&mut Dashboard, String> {
+        let dashboard = self
+            .dashboards
+            .get_mut(self.active)
+            .ok_or_else(|| "No active dashboard.".to_string())?;
+        match dashboard.kind {
+            DashboardType::BlankType => Ok(dashboard),
+            DashboardType::FixedType => {
+                Err("The fixed dashboard can't be edited. Use :dashboard_new first.".to_string())
+            }
+        }
+    }
+
+    pub fn add_widget(&mut self, widget: Widget) -> Result<(), String> {
+        self.active_editable()?.widgets.push(widget);
+        Ok(())
+    }
+
+    pub fn remove_widget(&mut self, index: usize) -> Result<(), String> {
+        let dashboard = self.active_editable()?;
+        if index >= dashboard.widgets.len() {
+            return Err(format!("Widget {} does not exist.", index + 1));
+        }
+        dashboard.widgets.remove(index);
+        Ok(())
+    }
+
+    pub fn widget_rows(&self) -> Vec<Vec<String>> {
+        let Some(dashboard) = self.active() else {
+            return Vec::new();
+        };
+        if matches!(dashboard.kind, DashboardType::FixedType) {
+            return vec![vec!["The fixed dashboard has built-in widgets.".to_string()]];
+        }
+        if dashboard.widgets.is_empty() {
+            return vec![vec!["No widgets yet. Use :widget_add.".to_string()]];
+        }
+        dashboard
+            .widgets
+            .iter()
+            .enumerate()
+            .map(|(index, widget)| {
+                let mut row = vec![(index + 1).to_string()];
+                row.extend(widget.describe());
+                row
+            })
+            .collect()
     }
 
     pub fn set_active(&mut self, index: usize) -> Result<(), String> {
